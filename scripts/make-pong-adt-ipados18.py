@@ -39,6 +39,19 @@ UFS_SPI = 265
 CPU_AFFINITIES = [i << 8 for i in range(8)]
 
 
+def load_board(name):
+    """Board data of an SM8475 board: configs/<name>-board.json.
+
+    pong and liuqin share every SoC resource above; the board file holds what differs:
+    memory description, panel geometry and scale, touch wiring and the presented identity.
+    """
+    path = ROOT / 'configs' / f'{name}-board.json'
+    board = json.loads(path.read_text())
+    if board.get('board') != name:
+        raise ValueError(f'{path} describes {board.get("board")!r}, not {name!r}')
+    return board
+
+
 def load_format2_hardware(path):
     """Use the selected DTSI/DTS for resources consumed by the Pong loader.
 
@@ -137,7 +150,10 @@ def main():
                         help='publish a DarwinBoot PackedRAMDisk range for an ephemeral APFS Data seed')
     parser.add_argument('--skip-image-verification', action='store_true',
                         help='emit the DT without an additional output audit')
+    parser.add_argument('--board', default=os.environ.get('UNIXNU_SM8475_BOARD', 'pong'),
+                        help='SM8475 board data, configs/<board>-board.json (pong or liuqin)')
     args = parser.parse_args()
+    board = load_board(args.board)
     if os.environ.get('PONG_HARDWARE_DTB'):
         load_format2_hardware(os.environ['PONG_HARDWARE_DTB'])
     if args.root_match_volume_uuid:
@@ -167,7 +183,10 @@ def main():
     # or a claim of Apple personalization. Keep only its SHA-384 digest in DT.
     # Rebooting the same image reuses it; rebuilding rolls it.
     boot_nonce_hash = hashlib.sha384(os.urandom(32)).digest()
-    backlight = json.loads((ROOT / 'configs/pong-display-sm8475.json').read_text())['brightness']
+    # Only pong's panel takes DSI DCS brightness; PongBacklight refuses any other controller.
+    backlight_config = board['display'].get('backlight_config')
+    backlight = json.loads((ROOT / backlight_config).read_text())['brightness'] if backlight_config else None
+    identity = board['identity']
     chosen = [
         ('random-seed', os.urandom(64)),
         ('osenvironment', b'main\0'),
@@ -175,16 +194,17 @@ def main():
         # scale becomes 0 in FBSDisplayMode (infinite logical dimensions) and
         # SpringBoard deliberately traps before creating its main display.
         # Keep the real framebuffer pixels; do not substitute an Apple panel.
-        ('display-scale', struct.pack('<I', 3)),
-        ('pong-dsi-backlight', struct.pack('<Q6I',
+        ('display-scale', struct.pack('<I', board['display']['scale'])),
+        *([('pong-dsi-backlight', struct.pack('<Q6I',
             int(backlight['controller'], 0), backlight['register_bytes'],
             backlight['maximum'], backlight['minimum_nonzero'],
-            int(backlight['bl_inverted_dbv']), backlight['channel'], backlight['version'])),
+            int(backlight['bl_inverted_dbv']), backlight['channel'], backlight['version']))]
+          if backlight else []),
         ('pong-audio-dma', bytes(16)),
         ('darwinboot-memory-ranges', bytes(32 + 64 * 16)),
         ('pong-allocatable-ram', b''.join(
             struct.pack('<QQ', int(bank['base'], 0), int(bank['size'], 0))
-            for bank in json.loads((ROOT / 'configs/pong-memory-sm8475.json').read_text())['allocatable'])),
+            for bank in json.loads((ROOT / board['memory']).read_text())['allocatable'])),
         ('display-rotation', struct.pack('<I', 0)),
         # Host UTC sampled for this temporary development boot. The platform
         # expert advances this software clock using the native arch timer.
@@ -251,30 +271,33 @@ def main():
         # until a complete Pong GIC SPI provider and interrupt specifier exist.
         ('pong,ufs-spi', struct.pack('<I', UFS_SPI)),
     ])
-    # Actual Pong live DT: QUP0 SE4 / Goodix Berlin-D, GPIO20 reset/21 IRQ.
+    # Touch on QUP0 SE4 of both boards: pong Goodix Berlin-D (GPIO20 reset/21 IRQ),
+    # liuqin Novatek NT36532 (21 IRQ, no reset). The node name selects the driver.
     # Absolute metadata avoids an incomplete arm-io interrupt/reg mapping.
-    touch = node('pong-touch', [
-        ('compatible', b'pong,goodix-berlin-d\0'),
-        ('spi-base', struct.pack('<Q', 0x990000)),
+    touch_board = board['touch']
+    touch = node(touch_board['node'], [
+        ('compatible', touch_board['compatible'].encode() + b'\0'),
+        ('spi-base', struct.pack('<Q', int(touch_board['spi_base'], 0))),
         ('tlmm-base', struct.pack('<Q', 0xF000000)),
         ('gcc-base', struct.pack('<Q', 0x100000)),
         ('rsc-base', struct.pack('<Q', 0x17A20000)),
         ('cmd-db-base', struct.pack('<Q', 0x80860000)),
         ('gpio-offset', struct.pack('<I', 0x100000)),
-        ('pins', struct.pack('<6I', 16, 17, 18, 19, 21, 20)),
-        ('max-x', struct.pack('<I', 1080)), ('max-y', struct.pack('<I', 2412)),
+        ('pins', struct.pack('<6I', *touch_board['pins'])),
+        ('max-x', struct.pack('<I', touch_board['max_x'])),
+        ('max-y', struct.pack('<I', touch_board['max_y'])),
     ])
     tree = node('device-tree', [
         # Keys use the actual SM8475 PMIC-arbiter resources below.
         # MobileGestalt derives ProductType/DeviceClass from hw.product, which
         # comes from this model. Keep the restore's J171 board policy (jetsam,
-        # arm64 ABI) separate from the requested iPhone presentation identity.
-        # Physical resources remain Pong/SM8475; /product is an ADT node.
-        ('model', b'iPhone17,1\0'),
-        ('compatible', b'J171AP\0iPhone17,1\0qcom,sm8475\0'),
-        ('target-type', b'J171\0'),
-        ('target-sub-type', b'J171AP\0'),
-        ('pong,physical-model', b'Nothing Phone (2)\0'),
+        # arm64 ABI) separate from the presentation identity of the board file.
+        # Physical resources remain SM8475; /product is an ADT node.
+        ('model', identity['model'].encode() + b'\0'),
+        ('compatible', b''.join(c.encode() + b'\0' for c in identity['compatible'])),
+        ('target-type', identity['target_type'].encode() + b'\0'),
+        ('target-sub-type', identity['target_sub_type'].encode() + b'\0'),
+        ('pong,physical-model', board['physical_model'].encode() + b'\0'),
         ('#address-cells', struct.pack('<I', 2)),
         ('#size-cells', struct.pack('<I', 2)),
     ], [
@@ -306,24 +329,25 @@ def main():
             ('opposed-power-vol-buttons', struct.pack('<I', 1)),
         ]),
         node('product', [
-            ('product-name', b'iPhone 16 Pro\0'),
-            ('product-description', b'iPhone 16 Pro\0'),
-            ('artwork-device-idiom', b'phone\0'),
-            # iPhone 16 Pro artwork family. Physical display geometry stays
-            # 1080x2412 in /chosen and the framebuffer, not 1206x2622.
-            ('artwork-device-subtype', struct.pack('<I', 2622)),
+            ('product-name', identity['product_name'].encode() + b'\0'),
+            ('product-description', identity['product_description'].encode() + b'\0'),
+            ('artwork-device-idiom', identity['artwork_device_idiom'].encode() + b'\0'),
+            # Artwork family of the board file (pong: iPhone 16 Pro, 2622; liuqin: the
+            # restore's own iPad7,11, 2160). Physical display geometry stays the panel's
+            # in /chosen and the framebuffer.
+            ('artwork-device-subtype', struct.pack('<I', identity['artwork_device_subtype'])),
             ('artwork-dynamic-displaymode', b'0\0'),
             ('artwork-display-gamut', b'sRGB\0'),
-            ('compatible-device-fallback', b'iPhone17,1\0'),
+            ('compatible-device-fallback', identity['compatible_device_fallback'].encode() + b'\0'),
             ('compatible-app-variant', b'0\0'),
-            # Keep Pong's v82 memory performance tier. Phone artwork does
+            # Keep Pong's v82 memory performance tier. Artwork does
             # not authorize a higher memory budget in the 1 GiB XNU window.
-            ('device-perf-memory-class', struct.pack('<I', 3)),
-            ('thin-bezel', struct.pack('<I', 1)),
+            ('device-perf-memory-class', struct.pack('<I', identity['device_perf_memory_class'])),
+            ('thin-bezel', struct.pack('<I', identity['thin_bezel'])),
             ('allow-32bit-apps', struct.pack('<I', 0)),
             ('ephemeral-data-mode', struct.pack('<I', 0)),
             ('udid-version', struct.pack('<I', 1)),
-            ('artwork-scale-factor', struct.pack('<I', 3)),
+            ('artwork-scale-factor', struct.pack('<I', identity['artwork_scale_factor'])),
         ]),
     ])
     # Hardware-only probes do not load AppleImage4. Full root boot does, and its

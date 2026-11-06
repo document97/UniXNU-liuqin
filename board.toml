@@ -1,15 +1,15 @@
 schema_version = 2
 
 [board]
-name = "pong"
+name = "liuqin"
 soc = "SM8475"
 soc_source = "sm8475"
 # The 22H374 profile ships in this repository at os-profiles/ and is installed into the
 # UniXNU checkout before resolving (scripts/install-device-profile.py), because
 # UniXNU/profiles/os/ has no 18.x profile yet.
 os_profile = "ipados-18.7.10-22H374"
-description = "Nothing Phone (2): UniXNU UEFI bring-up"
-kit = "pong"
+description = "Xiaomi Pad 6 Pro (liuqin): UniXNU first boot on the SM8475 pong stack"
+kit = "liuqin"
 
 # iPadOS 18.7.10 restore selected from the matching J171 BuildIdentity.
 [ipsw]
@@ -23,17 +23,19 @@ board_id = 0x1c
 fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemOS", "Cryptex1,SystemTrustCache", "Cryptex1,AppOS", "Cryptex1,AppTrustCache", "OS"]
 
 [components]
+# liuqin is SM8475 like pong: PongPlatform24 is used as the shared SM8475 implementation
+# (A730, QCA6490, UFS, PMIC keys). Board data comes from configs/liuqin-board.json.
 # This is the community Pong A730/QCA6490/Darwin24 implementation, not the A740/WCN7850 source.
 # The kit lives in this repository at kits/PongPlatform24 and declares no archive recipe: the
 # kernel step of this board builds the aggregate itself, see [kernel] below.
 include = ["PongPlatform24"]
 
 [device_tree]
-source = "device:dts/pong.dts"
+source = "device:dts/liuqin.dts"
 include_dirs = ["soc:dts"]
 
 [kernel]
-defconfig = "pong_ipados18_defconfig"
+defconfig = "liuqin_ipados18_defconfig"
 config_fragments = ["arch:configs/common.config", "soc:configs/sm8475.config", "os:configs/ipados.config"]
 patch_series = ["device:migration/format2/arch-darwin24.series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu-ipados18/series"]
 # Explicitly empty: an array here replaces the arch profile's list, and its
@@ -57,12 +59,12 @@ slide = "-0x1000000"
 roots = ["com.apple.kec.corecrypto", "com.apple.kec.pthread", "com.apple.filesystems.apfs",
          "com.apple.kec.Compression", "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib"]
 [firmware]
-config = "pong"
-dsc = "Platforms/Nothing/pongPkg/pong.dsc"
-fd = "Build/pongPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
+config = "liuqin"
+dsc = "Platforms/Xiaomi/liuqinPkg/liuqin.dsc"
+fd = "Build/liuqinPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
 # Runs in the build tree before the firmware build and writes the device tree the boot image
 # carries; [bootimg] dtb names the same path.
-preflight = ["scripts/build-pong-hardware-dtb.py"]
+preflight = ["scripts/build-pong-hardware-dtb.py --source dts/liuqin.dts --output build/liuqin/liuqin.dtb"]
 patches = [
   "Resources/MuPatches/AsmMacroLib.patch",
   "Resources/MuPatches/Auth-Service.patch",
@@ -75,6 +77,7 @@ packages = [
   "{tree}/package",
   "{tree}/drivers/DarwinBoot24",
   "{edk2}",
+  "{uefi}/Platforms/Xiaomi",
   "{uefi}/Platforms/Nothing",
   "{uefi}/Common/Mu",
   "{uefi}/Common/Mu_OEM_Sample",
@@ -90,12 +93,12 @@ DEVICE_MODEL = "0"
 ENABLE_SECUREBOOT = "0"
 MEMORY_PROTECTION = "TRUE"
 SHIP_MODE = "FALSE"
-BUILDID_STRING = "UniXNU-Pong"
-PONG_INITRD_DISK_ENABLED = "1" # Set 0 to isolate SEC/HOB without the disk DXE.
+BUILDID_STRING = "UniXNU-liuqin"
+LIUQIN_INITRD_DISK_ENABLED = "1" # Set 0 to isolate SEC/HOB without the disk DXE.
 
 [payload]
 # The boot menu entry the firmware's DarwinBoot lists first, and the volume label of payload.img.
-title = "Pong iPadOS 18.7.10"
+title = "liuqin iPadOS 18.7.10"
 volume = "UNIXNU"
 # 96 MiB, the --fat-mib a local run packs: PongBootMemoryDxe refuses an initrd
 # above PONG_FAT_MAX_INITRD (128 MiB), and the 4096-byte PONGFAT1 header is
@@ -107,6 +110,8 @@ size_mib = 96
 # applog list trimmed to the services the trace reads. DarwinBoot copies the line into a
 # 1024-byte buffer and refuses more than 1000 bytes; keep the final assembled line within1023 bytes.
 kernel_args = [
+  # liuqin first boot: pong arguments with touch, audio, USB and GPU scanout off
+  # (no liuqin driver yet); the UI renders in software on the ABL splash framebuffer.
   "keepsyms=1",
   "cpus=1",
   "pong_allow_unauthenticated_root=1",
@@ -118,8 +123,8 @@ kernel_args = [
   "serial=0",
   "pong_disable_swap=1",
   "pong_skip_setup=1",
-  "pong_adsp=2",
-  "pong_audio=2",
+  "pong_adsp=0",
+  "pong_audio=0",
   "pong_ufs_readwrite=1",
   "ignition_level=1",
   "dyld_flags=0x8",
@@ -131,17 +136,17 @@ kernel_args = [
   "pong_display=1",
   "pong_software_ui=1",
   "pong_ui_software=1",
-  "pong_touch=1",
+  "pong_touch=0",
   "pong_buttons=1",
   "pong_init_path=/pong/init",
   "pong_build=ipados18-22H374",
-  "pong_gpu_scanout=1",
+  "pong_gpu_scanout=0",
   "pong_gpu_pool_mib=0",
-  "pong_metal_global=1",
+  "pong_metal_global=0",
   "pong_gpu_lock_max=1",
-  "pong_usb=1",
-  "pong_usb_mux=1",
-  "pong_usb_iphone=1",
+  "pong_usb=0",
+  "pong_usb_mux=0",
+  "pong_usb_iphone=0",
   "pong_rootful=1",
 ]
 
@@ -175,12 +180,12 @@ lba_bytes = 4096
 unixnu = "../UniXNU"
 
 [package.defconfig]
-"ipados-18.7.10-22H374" = "pong_ipados18_defconfig"
+"ipados-18.7.10-22H374" = "liuqin_ipados18_defconfig"
 
 [bootimg]
 # Compiled by scripts/build-pong-hardware-dtb.py at the firmware preflight step, relative to the
 # build tree (docs/porting/packaging.md).
-dtb = "build/pong/pong.dtb"
+dtb = "build/liuqin/liuqin.dtb"
 
 [bootimg.image]
 # Resources/Configs/pong.toml in the firmware records the Android build system's v4, but unixnu

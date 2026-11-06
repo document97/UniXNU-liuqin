@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Pack Pong's v4 boot image and verify its contents without touching a device.
+"""Pack an SM8475 board's v4 UEFI boot image and verify it without touching a device.
 
 UniXNU's current bootimg.verify assumes the legacy header layout. Use the same
-verified shim compiler and Mu-Silicium mkbootimg with a Pong-specific v4 reader.
+verified shim compiler and Mu-Silicium mkbootimg with the v4 reader pong and liuqin
+share: --device liuqin --uefi ../uefi-liuqin --dtb <stock Cape DTB of vendor_boot>.
 """
 import argparse
 import gzip
@@ -57,22 +58,28 @@ def main():
     parser.add_argument('--ramdisk', type=Path, help='Optional FAT payload; empty for UEFI bring-up')
     parser.add_argument('--output-dir', type=Path, help='Keep staged bring-up images in separate directories')
     parser.add_argument('--fd', type=Path, help='Use a saved firmware volume for controlled comparisons')
+    parser.add_argument('--device', default='pong', help='Mu-Silicium device name: pong or liuqin')
+    parser.add_argument('--uefi', type=Path, help='Mu-Silicium checkout (default ../Mu-Silicium)')
+    parser.add_argument('--dtb', type=Path,
+                        help='DTB the ABL selects by msm-id/board-id (default Resources/DTBs/<device>.dtb); '
+                             'for liuqin the stock Cape DTB of vendor_boot, tools/fetch-liuqin-stock.py')
     args = parser.parse_args()
-    uefi = ROOT / 'Mu-Silicium'
-    config = tomllib.loads((uefi / 'Resources/Configs/pong.toml').read_text())
+    uefi = args.uefi or ROOT / 'Mu-Silicium'
+    device = args.device
+    config = tomllib.loads((uefi / f'Resources/Configs/{device}.toml').read_text())
     base, size = config['uefi_fd']['base'], config['uefi_fd']['size']
-    fd = args.fd or uefi / 'Build/pongPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd'
+    fd = args.fd or uefi / f'Build/{device}Pkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd'
     firmware = fd.read_bytes()
     if len(firmware) != size:
-        raise ValueError('Firmware size differs from the Pong configuration')
-    dtb = (uefi / 'Resources/DTBs/pong.dtb').read_bytes()
+        raise ValueError(f'Firmware size differs from the {device} configuration')
+    dtb = (args.dtb or uefi / f'Resources/DTBs/{device}.dtb').read_bytes()
     if dtb[:4] != b'\xd0\x0d\xfe\xed' or struct.unpack_from('>I', dtb, 4)[0] != len(dtb):
-        raise ValueError('Invalid Pong DTB')
-    out = args.output_dir or ROOT / 'UniXNU/out/pong/boot'
+        raise ValueError(f'Invalid {device} DTB')
+    out = args.output_dir or ROOT / f'UniXNU/out/{device}/boot'
     out.mkdir(parents=True, exist_ok=True)
-    image = out / 'pong-unixnu-uefi.img'
+    image = out / f'{device}-unixnu-uefi.img'
     ramdisk = args.ramdisk.read_bytes() if args.ramdisk else b''
-    with tempfile.TemporaryDirectory(prefix='pong-bootimg-') as name:
+    with tempfile.TemporaryDirectory(prefix=f'{device}-bootimg-') as name:
         scratch = Path(name)
         shim = compile_shim(uefi, base, size, True, scratch)
         combined = shim + firmware
@@ -97,7 +104,7 @@ def main():
     report.update(image_bytes=len(data), image_sha256=digest(data),
                   fd_bytes=len(firmware), fd_sha256=digest(firmware),
                   dtb_sha256=digest(dtb), shim_bytes=len(shim), fd_base=hex(base),
-                  hardware_tested=False, xnu_kernel_included=False)
+                  device=device, hardware_tested=False, xnu_kernel_included=False)
     (out / 'boot.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, indent=2))
     print(image)
