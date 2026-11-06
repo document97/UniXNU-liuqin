@@ -12,8 +12,11 @@
     compatible = "xiaomi,liuqin", "qcom,sm8475";
     #address-cells = <2>;
     #size-cells = <2>;
-    /* 8 GB unit, stock ABL /memory. */
-    memory@80000000 { device_type = "memory"; reg = <0x0 0x80000000 0x0 0x6a000000 0x0 0xf1400000 0x0 0xec00000 0x8 0x0 0x0 0x39700000 0x8 0x39d00000 0x0 0x1e00000 0x8 0x40000000 0x1 0x40000000>; };
+    /* 8 GB unit, stock ABL /memory. Single contiguous DRAM range for the XNU ADT
+     * (devicetree.generate() requires exactly one memory register). Bank 4 is the
+     * largest contiguous span (5 GiB); the other banks are reserved below so XNU
+     * never tries to allocate from them. */
+    memory@840000000 { device_type = "memory"; reg = <0x8 0x40000000 0x1 0x40000000>; };
     reserved-memory {
         #address-cells = <2>;
         #size-cells = <2>;
@@ -76,6 +79,12 @@
         region55@ed900000 { reg = <0x0 0xed900000 0x0 0x3b00000>; no-map; }; /* mainline:memory@ed900000 */
         region56@f8700000 { reg = <0x0 0xf8700000 0x0 0x280000>; no-map; }; /* mainline:memory@f8700000 */
         region57@830000000 { reg = <0x8 0x30000000 0x0 0x10000000>; no-map; }; /* uefiplat:HYP Reserved */
+        /* liuqin DRAM banks outside the single contiguous memory range, reserved so
+         * XNU never allocates from them (see devicetree.generate(): one DRAM range). */
+        region58@80000000 { reg = <0x0 0x80000000 0x0 0x6a000000>; no-map; }; /* dram bank 0 */
+        region59@f1400000 { reg = <0x0 0xf1400000 0x0 0xec00000>; no-map; }; /* dram bank 1 */
+        region60@800000000 { reg = <0x8 0x0 0x0 0x39700000>; no-map; }; /* dram bank 2 */
+        region61@839d00000 { reg = <0x8 0x39d00000 0x0 0x1e00000>; no-map; }; /* dram bank 3 */
     };
     /*
      * Novatek NT36532 TDDI on QUP0 SE4 (spi@990000) chip select 0, 9.6 MHz, IRQ gpio21

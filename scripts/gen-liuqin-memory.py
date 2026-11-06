@@ -145,19 +145,27 @@ def dts_block(dram, reserved) -> str:
     (base, size) order, no-map; an exact duplicate keeps the first source's name."""
     def cells(v):
         return f"{v >> 32:#x} {v & 0xFFFFFFFF:#x}"
-    lines = ["    /* 8 GB unit, stock ABL /memory. */",
-             '    memory@80000000 { device_type = "memory"; reg = <'
-             + " ".join(f"{cells(b)} {cells(s)}" for b, s in sorted(dram)) + ">; };",
+    # devicetree.generate() requires exactly one contiguous DRAM range: keep the
+    # largest bank as /memory and reserve the rest so XNU never allocates from them.
+    dram = sorted(dram, key=lambda bs: bs[1])
+    single = [dram[-1]]
+    rest = dram[:-1]
+    lines = ["    /* 8 GB unit, stock ABL /memory. Single contiguous DRAM range for the XNU ADT. */",
+             '    memory@840000000 { device_type = "memory"; reg = <'
+             + " ".join(f"{cells(b)} {cells(s)}" for b, s in single) + ">; };",
              "    reserved-memory {",
              "        #address-cells = <2>;",
              "        #size-cells = <2>;",
              "        ranges;"]
+    for i, (b, s) in enumerate(rest):
+        lines.append(f"        dram-bank-{i}@{b:x} {{ reg = <{cells(b)} {cells(s)}>; no-map; }}; /* dram bank {i} */")
     kept: dict[tuple[int, int], str] = {}
     for name, base, size in sorted(reserved, key=lambda r: (r[1], r[2])):
         kept.setdefault((base, size), name)
     kept = [(n, b, s) for (b, s), n in kept.items()]
-    for i, (name, base, size) in enumerate(kept):
-        lines.append(f"        region{i}@{base:x} {{ reg = <{cells(base)} {cells(size)}>; no-map; }}; /* {name} */")
+    base = len(rest)
+    for i, (name, base_addr, size) in enumerate(kept):
+        lines.append(f"        region{base + i}@{base_addr:x} {{ reg = <{cells(base_addr)} {cells(size)}>; no-map; }}; /* {name} */")
     lines.append("    };")
     return "\n".join(lines) + "\n"
 
