@@ -54,6 +54,35 @@ def overlay(device, destination):
     return destination
 
 
+KERNELCACHE = Path('apple/ipados18-22H374/components/kernelcache.release.ipad7c.decompressed/'
+                   'kernelcache.release.ipad7c.decompressed')
+
+
+def original_kernelcache(device, artifact_dir):
+    """Place the original 22H374 kernelcache where the storage step reads it.
+
+    The local flow extracts it with prepare-ipados18-components.py. Under
+    `unixnu release` the deps step has already fetched and decompressed the
+    board's [ipsw] KernelCache into <out>/ipsw/22H374/ (artifact_dir is
+    <out>/<board>/<os>/<config>/kernel), so it is linked from there.
+    """
+    wanted = device / KERNELCACHE
+    if wanted.is_file():
+        return
+    cache = artifact_dir.parents[3] / 'ipsw/22H374/kernelcache.decompressed'
+    if not cache.is_file():
+        raise SystemExit(f'{wanted} missing and {cache} not fetched: the deps step of release fetches '
+                         'the board.toml [ipsw] KernelCache, or run prepare-ipados18-components.py')
+    data = cache.read_bytes()
+    if data[:4] != b'\xcf\xfa\xed\xfe':
+        raise SystemExit(f'{cache} is not a 64-bit Mach-O kernelcache')
+    wanted.parent.mkdir(parents=True, exist_ok=True)
+    if wanted.is_symlink():
+        wanted.unlink()
+    wanted.symlink_to(cache)
+    print(f'original kernelcache: {cache} ({len(data)} bytes)', flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, add_help=False)
     parser.add_argument('--overlay-only', action='store_true')
@@ -66,6 +95,8 @@ def main():
     if not args.overlay_only and not args.artifact_dir:
         raise SystemExit('--artifact-dir is required when building the kernel')
     target = args.overlay_dir or args.artifact_dir.resolve().parent / 'pong-runtime-source'
+    if args.artifact_dir:
+        original_kernelcache(device, args.artifact_dir.resolve())
     target = overlay(device, target)
     if args.overlay_only:
         print(target)
