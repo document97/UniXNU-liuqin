@@ -1,5 +1,18 @@
 name: package
 
+# liuqin (Xiaomi Pad 6 Pro). The pipeline is pong's, with these differences:
+#   * the firmware tree is Document97/uefi-liuqin (liuqinPkg), and the configuration
+#     stays configs/liuqin_ipados18_defconfig, which already leaves out the stages
+#     that need non-public firmware (pong repoints to its CI defconfig instead);
+#   * the bootable image is boot/liuqin-xnu-initial.img for ONE RAM-only
+#     `fastboot boot` from the stock ABL: kernel slot = gzip(BootShim + FD) of
+#     release's boot.img followed by the stock Cape SoC DTB (from the encrypted
+#     release stock-V14.0.9.0.TMYCNXM of uefi-liuqin), ramdisk = PONGFAT1 payload;
+#   * the repository is public, so every artifact that carries Apple or vendor bytes
+#     is uploaded only as AES-256 7z with the secret LIUQIN_ARTIFACT_PASSWORD, and
+#     kept for a short time.
+# The pong text below still describes the shared parts.
+
 # docs/porting/packaging.md, plus the artifact that document leaves out: the
 # userdata image.
 #
@@ -71,6 +84,10 @@ env:
   IPSW_URL: ${{ inputs.ipsw_url }}
   IPSW_SHA256: ${{ inputs.ipsw_sha256 }}
   PRELINK: ${{ inputs.prelink }}
+  BOARD: liuqin
+  CONFIG: liuqin_ipados18
+  STOCK_REPO: Document97/uefi-liuqin
+  STOCK_RELEASE: stock-V14.0.9.0.TMYCNXM
   # Pinned: `release`, its steps and this repository's scripts/package.sh are one
   # interface. Move both together.
   UNIXNU_REF: c96b29975645b711dc06bc435c3ad27321ce817c
@@ -86,6 +103,17 @@ jobs:
     outputs:
       staged: ${{ steps.userland.outputs.staged }}
     steps:
+      - name: artifact password
+        env:
+          ARTIFACT_PASSWORD: ${{ secrets.LIUQIN_ARTIFACT_PASSWORD }}
+        run: |
+          if [ "${#ARTIFACT_PASSWORD}" -lt 12 ]; then
+            echo "::error::Set the repository secret LIUQIN_ARTIFACT_PASSWORD (12+ characters): artifacts carry Apple and vendor bytes and are only uploaded encrypted."
+            exit 1
+          fi
+          export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+          command -v 7zz >/dev/null || brew install sevenzip
+          7zz i | head -3
       - uses: actions/checkout@v4
         with:
           path: device
@@ -236,15 +264,33 @@ jobs:
           PY
           cp -f ci-volume-layout.json ci-products/ci-volume-layout.json
           df -h
+      - name: encrypt the userdata parts
+        if: steps.userland.outputs.staged == 'true'
+        env:
+          ARTIFACT_PASSWORD: ${{ secrets.LIUQIN_ARTIFACT_PASSWORD }}
+        timeout-minutes: 120
+        run: |
+          set -euo pipefail
+          # One part at a time, deleting each plaintext part once its archive tests
+          # good, so the disk holds at most one extra part.
+          mkdir -p upload-userdata
+          cp -f ci-products/* upload-userdata/
+          for part in out/ipados18/ufs/pong-ipados18-userdata.img.part*; do
+            name="$(basename "$part")"
+            7zz a -t7z -mx=0 -mhe=on "-p${ARTIFACT_PASSWORD}" "upload-userdata/${name}.7z" "$part" > /dev/null
+            7zz t "-p${ARTIFACT_PASSWORD}" "upload-userdata/${name}.7z" > /dev/null
+            rm -f "$part"
+            echo "encrypted ${name}"
+          done
+          df -h
       - uses: actions/upload-artifact@v4
         if: steps.userland.outputs.staged == 'true'
         with:
-          name: pong-userdata
-          retention-days: 30
+          name: liuqin-userdata
+          retention-days: 3
           if-no-files-found: error
-          path: |
-            ci-products/
-            out/ipados18/ufs/pong-ipados18-userdata.img.part*
+          compression-level: 0
+          path: upload-userdata/
       - uses: actions/upload-artifact@v4
         # Always, so the package job has one shape to read either way: the file is
         # absent when nothing was staged.
@@ -265,6 +311,17 @@ jobs:
     runs-on: macos-15-intel
     timeout-minutes: 300
     steps:
+      - name: artifact password
+        env:
+          ARTIFACT_PASSWORD: ${{ secrets.LIUQIN_ARTIFACT_PASSWORD }}
+        run: |
+          if [ "${#ARTIFACT_PASSWORD}" -lt 12 ]; then
+            echo "::error::Set the repository secret LIUQIN_ARTIFACT_PASSWORD (12+ characters): artifacts carry Apple and vendor bytes and are only uploaded encrypted."
+            exit 1
+          fi
+          export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+          command -v 7zz >/dev/null || brew install sevenzip
+          7zz i | head -3
       - uses: actions/checkout@v4
         with:
           path: device
@@ -277,9 +334,10 @@ jobs:
           submodules: recursive
       - uses: actions/checkout@v4
         with:
-          repository: Chengdong-Yu/uefi-pong
+          repository: Document97/uefi-liuqin
+          ref: liuqin
           # The firmware tree the volume and the boot image are built from.
-          path: uefi-pong
+          path: uefi-liuqin
           submodules: recursive
       - uses: actions/download-artifact@v4
         continue-on-error: true
@@ -344,6 +402,8 @@ jobs:
           fi
           echo "platform seed ${chip}"
       - name: select the configuration this runner can build
+        # liuqin_ipados18_defconfig is already the CI-safe configuration.
+        if: env.BOARD == 'pong'
         run: |
           set -euo pipefail
           # `release` reads its configuration from [package.defconfig], and that
@@ -432,13 +492,13 @@ jobs:
         working-directory: device
         env:
           UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
-          UNIXNU_UEFI: ${{ github.workspace }}/uefi-pong
+          UNIXNU_UEFI: ${{ github.workspace }}/uefi-liuqin
           UNIXNU_DEVICE: ${{ github.workspace }}/device
           PONG_VOLUME_LAYOUT: ${{ github.workspace }}/ci-volume-layout.json
           PONG_LLVM: ${{ env.LLVM_KEG }}/bin
         run: |
           set -euo pipefail
-          args=(--os "${OS_PROFILE}" --uefi ../uefi-pong -j 3 --unique-chip-id "${UNIXNU_UNIQUE_CHIP_ID}")
+          args=(--os "${OS_PROFILE}" --uefi ../uefi-liuqin -j 3 --unique-chip-id "${UNIXNU_UNIQUE_CHIP_ID}")
           # Without an original kernelcache the kernel step stages the native
           # build as kernel.macho, which is the bootable one. With prelink it
           # prelinks the extracted 22H374 kernelcache instead.
@@ -446,6 +506,28 @@ jobs:
             args+=(--skip-prelink)
           fi
           ./scripts/package.sh "${args[@]}"
+      - name: stock Cape SoC DTB
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_PASSWORD: ${{ secrets.LIUQIN_ARTIFACT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # The DTB the stock ABL selects by msm-id, from the build on the tablet
+          # (uefi-liuqin release, AES-256 7z). The hardware DTB release appends to
+          # its kernel slot describes the board for the ADT and is not one the ABL
+          # accepts.
+          gh release download "${STOCK_RELEASE}" -R "${STOCK_REPO}" -p '*.7z' -D "${RUNNER_TEMP}/stock-dl"
+          7zz x -y "-p${ARTIFACT_PASSWORD}" "-o${RUNNER_TEMP}/stock" "${RUNNER_TEMP}"/stock-dl/*.7z > /dev/null
+          python3 - "${RUNNER_TEMP}/stock" <<'EOF'
+          import hashlib, json, sys
+          from pathlib import Path
+          d = Path(sys.argv[1])
+          m = json.loads((d / "stock-manifest.json").read_text())
+          for name, want in m["files"].items():
+              got = hashlib.sha256((d / name).read_bytes()).hexdigest()
+              assert got == want["sha256"], f"{name}: {got} != {want['sha256']}"
+          print(f"stock {m['build']}: {', '.join(m['files'])} verified")
+          EOF
       - name: boot image for the firmware
         env:
           UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
@@ -463,18 +545,22 @@ jobs:
           #   container  Android boot v4 with an empty kernel slot and the payload
           #              in the PONGFAT1 envelope PongBootMemoryDxe publishes.
           python3 device/scripts/finalize-pong-adt.py \
-            --work-dir "UniXNU/out/pong/${OS_PROFILE}/pong_ipados18_ci" \
-            --uefi uefi-pong \
+            --work-dir "UniXNU/out/${BOARD}/${OS_PROFILE}/${CONFIG}" \
+            --uefi uefi-liuqin \
+            --board "${BOARD}" \
+            --abl-dtb "${RUNNER_TEMP}/stock/liuqin-cape.dtb" \
             --unique-chip-id "${UNIXNU_UNIQUE_CHIP_ID}" \
             --volume-layout ci-volume-layout.json
       - name: check the products
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import hashlib, json, struct
+          import hashlib, json, os, struct, zlib
           from pathlib import Path
-          root = Path('UniXNU/out/pong')
-          wanted = ('boot/boot.img', 'boot/pong-xnu-initial.img', 'payload/payload.img',
+          board = os.environ['BOARD']
+          root = Path('UniXNU/out') / board
+          image_name = '%s-xnu-initial.img' % board
+          wanted = ('boot/boot.img', 'boot/' + image_name, 'payload/payload.img',
                     'kernel/kernel.macho', 'package.manifest.json', 'boot/pong-boot.json',
                     'payload/pong-boot-manifest.json')
           found = {}
@@ -486,35 +572,47 @@ jobs:
               data = paths[0].read_bytes()
               print('%-38s %12d bytes  sha256 %s' % (name, len(data), hashlib.sha256(data).hexdigest()[:16]))
           report = json.loads(found['boot/pong-boot.json'].read_text())
-          # The flashable image is the container a local run writes: Android boot
-          # v4, no kernel in the kernel slot, the payload in a PONGFAT1 envelope,
-          # and an empty signature area.
-          image = found['boot/pong-xnu-initial.img'].read_bytes()
+          # The RAM-only image: Android boot v4, the firmware in the kernel slot
+          # (gzip BootShim + FD, then the stock Cape SoC DTB), the payload in a
+          # PONGFAT1 envelope, an empty signature area.
+          image = found['boot/' + image_name].read_bytes()
           header = image[:4096]
           if header[:8] != b'ANDROID!' or struct.unpack_from('<I', header, 40)[0] != 4:
-              raise SystemExit('pong-xnu-initial.img is not an Android boot v4 container')
+              raise SystemExit('%s is not an Android boot v4 container' % image_name)
           kernel_bytes, ramdisk_bytes = struct.unpack_from('<2I', header, 8)
-          if kernel_bytes or struct.unpack_from('<I', header, 20)[0] != 1584:
-              raise SystemExit('the kernel slot is not empty or the header size is not 1584')
-          if ramdisk_bytes != len(image) - 4096 - 4096:
-              raise SystemExit('the ramdisk size field does not match the image')
-          if image[4096:4104] != b'PONGFAT1':
+          if struct.unpack_from('<I', header, 20)[0] != 1584:
+              raise SystemExit('the header size is not 1584')
+          kernel = image[4096:4096 + kernel_bytes]
+          unpacker = zlib.decompressobj(31)
+          firmware = unpacker.decompress(kernel)
+          if not unpacker.eof or firmware[56:60] != b'ARM\x64':
+              raise SystemExit('the kernel slot is not gzip(BootShim + FD)')
+          dtb = unpacker.unused_data
+          cape = Path(os.environ['RUNNER_TEMP'], 'stock', 'liuqin-cape.dtb').read_bytes()
+          if dtb != cape:
+              raise SystemExit('the DTB after the firmware is not the stock Cape SoC DTB')
+          ramdisk_at = 4096 + -(-kernel_bytes // 4096) * 4096
+          if image[ramdisk_at:ramdisk_at + 8] != b'PONGFAT1':
               raise SystemExit('the ramdisk does not begin with the PONGFAT1 envelope')
           if any(image[-4096:]):
               raise SystemExit('the signature area is not empty')
-          # The firmware's own bound: PongBootMemoryDxe refuses a larger initrd.
-          if ramdisk_bytes > 128 * 1024 * 1024:
-              raise SystemExit('the initrd is %d bytes, over the firmware limit' % ramdisk_bytes)
-          # The spec image stays the document's: same container, raw payload.
+          # The ABL puts the vendor ramdisk of vendor_boot (21.7 MiB on
+          # V14.0.9.0.TMYCNXM) in front of this one; PongBootMemoryDxe scans at most
+          # 128 MiB of the joined initrd.
+          vendor_ramdisk = 22758937
+          if ramdisk_bytes + vendor_ramdisk + 4096 > 128 * 1024 * 1024:
+              raise SystemExit('the initrd would be %d bytes with the vendor ramdisk, over the firmware limit'
+                               % (ramdisk_bytes + vendor_ramdisk))
           spec = found['boot/boot.img'].read_bytes()
           if spec[4096:4104] == b'PONGFAT1':
-              raise SystemExit('boot.img should be the spec image, not the flashable one')
+              raise SystemExit('boot.img should be the spec image, not the bootable one')
           parameters = report['parameters']
-          if parameters['dram_size'] != '0x300000000' or parameters['window_size'] != '0x100000000' or parameters['cpus'] != 1:
-              raise SystemExit('the ADT parameters differ from a local run: %r' % (parameters,))
+          if parameters['dram_size'] != '0x200000000' or parameters['window_size'] != '0x100000000' or parameters['cpus'] != 1:
+              raise SystemExit('the ADT parameters are not the liuqin ones: %r' % (parameters,))
           package = json.loads(found['package.manifest.json'].read_text())
+          print('firmware', len(firmware), 'bytes; Cape DTB', len(dtb), 'bytes; initrd', ramdisk_bytes, 'bytes')
           print('kernel command line', package['kernel_command_line_bytes'], 'bytes')
-          print('ADT', report['adt_bytes'], 'bytes, args', report['boot_args'][:48], '...')
+          print('ADT', report['adt_bytes'], 'bytes, args', report['boot_args'][:64], '...')
           if report.get('hardware_tested') is not True:
               print('note: no device has run this boot image')
           PY
@@ -538,10 +636,24 @@ jobs:
           [ -f device/local.toml ] && cp -f device/local.toml products/local.toml || true
           du -sh products
           find products -type f | head -n 40
+      - name: encrypt the products
+        if: always()
+        env:
+          ARTIFACT_PASSWORD: ${{ secrets.LIUQIN_ARTIFACT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p upload
+          if [ -d products ] && [ -n "$(find products -type f | head -1)" ]; then
+            ( cd products && find . -type f -exec shasum -a 256 {} + > SHA256SUMS )
+            ( cd products && 7zz a -t7z -mx=1 -mhe=on "-p${ARTIFACT_PASSWORD}" ../upload/liuqin-package.7z . > /dev/null )
+            7zz t "-p${ARTIFACT_PASSWORD}" upload/liuqin-package.7z | tail -3
+            rm -rf products
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: pong-package
-          retention-days: 14
+          name: liuqin-package
+          retention-days: 3
           if-no-files-found: warn
-          path: products/
+          compression-level: 0
+          path: upload/

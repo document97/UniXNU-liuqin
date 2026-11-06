@@ -21,6 +21,13 @@ step repeats them with the local parameters so the artifacts agree:
 
 boot/boot.img itself stays exactly what `release` wrote: it is the document's
 artifact, with the raw payload as its ramdisk.
+
+--board selects configs/<board>-board.json; its "boot" table sets the label, the
+image name, the DRAM and window sizes and the kernel slot. pong keeps the slot
+empty. liuqin ("kernel_slot": "firmware") boots with one RAM-only `fastboot boot`
+from the stock ABL, so its kernel slot is the firmware: the gzip(BootShim + FD)
+stream of release's boot.img, followed by --abl-dtb (the stock Cape SoC DTB the
+ABL selects by msm-id) in place of the hardware DTB release appended.
 """
 import argparse
 import hashlib
@@ -41,7 +48,44 @@ BOOT_ARGS_BYTES = 1536       # BOOT_ARGS_SIZE 512 + BOOT_EXTRA_ARGS_SIZE 1024
 MAGIC = b'PONGFAT1'
 
 MANIFEST_FORMAT = 'pong-development-boot-manifest-v1'
-BOARD = 'Nothing Phone (2) / Pong / SM8475'
+PAGE = 4096
+PONG_BOOT = {'label': 'Nothing Phone (2) / Pong / SM8475', 'image': 'pong-xnu-initial.img',
+             'kernel_slot': 'empty', 'dram_size': '0x300000000', 'window_size': '0x100000000'}
+
+
+def load_boot(device, name):
+    path = device / 'configs' / f'{name}-board.json'
+    board = json.loads(path.read_text(encoding='utf-8')) if path.is_file() else {}
+    if not board and name != 'pong':
+        raise SystemExit(f'{path} missing')
+    return dict(PONG_BOOT, **board.get('boot', {}))
+
+
+def firmware_kernel(boot_img, abl_dtb):
+    """gzip(BootShim + FD) of release's boot.img, then the DTB the stock ABL selects."""
+    data = Path(boot_img).read_bytes()
+    if data[:8] != b'ANDROID!':
+        raise SystemExit(f'{boot_img} is not an Android boot image')
+    version = struct.unpack_from('<I', data, 40)[0]
+    if version >= 3:
+        kernel_size, _, _, header_size = struct.unpack_from('<4I', data, 8)
+        page, start = PAGE, -(-header_size // PAGE) * PAGE
+    else:
+        kernel_size = struct.unpack_from('<I', data, 8)[0]
+        page = struct.unpack_from('<I', data, 36)[0]
+        start = page
+    kernel = data[start:start + kernel_size]
+    unpacker = zlib.decompressobj(31)
+    combined = unpacker.decompress(kernel)
+    if not unpacker.eof or combined[56:60] != b'ARM\x64':
+        raise SystemExit(f'{boot_img}: the kernel slot is not gzip(BootShim + FD)')
+    stream = kernel[:len(kernel) - len(unpacker.unused_data)]
+    dtb = Path(abl_dtb).read_bytes()
+    if dtb[:4] != b'\xd0\x0d\xfe\xed':
+        raise SystemExit(f'{abl_dtb} is not a flattened device tree')
+    return stream + dtb, {'firmware_bytes': len(combined), 'gzip_bytes': len(stream),
+                          'abl_dtb_bytes': len(dtb), 'abl_dtb_sha256': hashlib.sha256(dtb).hexdigest(),
+                          'replaced_dtb_bytes': len(unpacker.unused_data)}
 
 
 def sha256(path):
@@ -70,19 +114,22 @@ def envelope(fat):
     return bytes(header) + fat
 
 
-def boot_image(ramdisk):
-    """Android boot v4: 4096-byte header page, the ramdisk, an empty signature area.
+def boot_image(ramdisk, kernel=b''):
+    """Android boot v4: 4096-byte header page, the kernel (page padded), the ramdisk,
+    an empty signature area.
 
-    The kernel slot stays empty because this device boots the UEFI firmware from
+    pong's kernel slot stays empty because that device boots the UEFI firmware from
     its own partition; the ramdisk is the whole payload. That is the container
-    scripts/build-ipados18-bootimg-local.py builds from its v4 template.
+    scripts/build-ipados18-bootimg-local.py builds from its v4 template. A board
+    whose firmware is started by the stock ABL passes it as the kernel.
     """
     header = bytearray(HEADER_BYTES)
     header[0:8] = b'ANDROID!'
-    struct.pack_into('<4I', header, 8, 0, len(ramdisk), 0, BOOT_HEADER_V4_SIZE)
+    struct.pack_into('<4I', header, 8, len(kernel), len(ramdisk), 0, BOOT_HEADER_V4_SIZE)
     struct.pack_into('<I', header, 40, 4)
     struct.pack_into('<I', header, 40 + 4 + BOOT_ARGS_BYTES, 0)  # signature_size
-    return bytes(header) + ramdisk + bytes(SIGNATURE_BYTES)
+    padded = kernel + bytes(-len(kernel) % PAGE)
+    return bytes(header) + padded + ramdisk + bytes(-len(ramdisk) % PAGE) + bytes(SIGNATURE_BYTES)
 
 
 def read_member(volume, member):
@@ -116,10 +163,14 @@ def main():
     parser.add_argument('--volume-layout', type=Path, help='layout JSON the kernel was configured with')
     parser.add_argument('--hardware-dtb', type=Path,
                         help='compiled board DTS (default: board.toml [bootimg] dtb under the work tree)')
-    parser.add_argument('--dram-size', type=lambda value: int(value, 0), default=0x300000000,
-                        help='physical DRAM the boot chain reports; a local run passes 12 GiB')
-    parser.add_argument('--window-size', type=lambda value: int(value, 0), default=0x100000000,
-                        help="DarwinBoot's allocation window; a local run passes 4 GiB")
+    parser.add_argument('--board', default=os.environ.get('UNIXNU_SM8475_BOARD', 'pong'),
+                        help='configs/<board>-board.json: ADT data and the "boot" table (default pong)')
+    parser.add_argument('--abl-dtb', type=Path,
+                        help='DTB the stock ABL selects, appended to the firmware kernel slot (kernel_slot "firmware")')
+    parser.add_argument('--dram-size', type=lambda value: int(value, 0), default=None,
+                        help='physical DRAM the boot chain reports (default: the board; pong 12 GiB)')
+    parser.add_argument('--window-size', type=lambda value: int(value, 0), default=None,
+                        help="DarwinBoot's allocation window (default: the board; 4 GiB)")
     parser.add_argument('--cpus', type=int, choices=range(1, 9), default=1,
                         help='CPU nodes in the ADT; a local bring-up run passes 1')
     parser.add_argument('--chip-id', default=None, help='BuildIdentity chip ID (default: board.toml [payload.adt])')
@@ -128,6 +179,15 @@ def main():
     parser.add_argument('--no-development-debug', dest='development_debug', action='store_false',
                         help='leave the DT debugger gate off; a local run turns it on')
     args = parser.parse_args()
+    boot = load_boot(device, args.board)
+    if args.dram_size is None:
+        args.dram_size = int(boot['dram_size'], 0)
+    if args.window_size is None:
+        args.window_size = int(boot['window_size'], 0)
+    if boot['kernel_slot'] not in ('empty', 'firmware'):
+        raise SystemExit(f'unknown kernel_slot {boot["kernel_slot"]!r}')
+    if boot['kernel_slot'] == 'firmware' and not args.abl_dtb:
+        raise SystemExit(f'{args.board} boots the firmware from the kernel slot: pass --abl-dtb')
 
     work = args.work_dir.resolve()
     board = tomllib.loads((device / 'board.toml').read_text())
@@ -157,7 +217,7 @@ def main():
         'system_volume_auth_blob_sha256': None,
         'kernel_sha384': None,
         'loader_sha384': None,
-        'board': BOARD,
+        'board': boot['label'],
         'boot_args': boot_args,
         'root_volume_uuid': root_uuid,
         'requested_memory_window_bytes': args.window_size,
@@ -167,6 +227,7 @@ def main():
 
     generated = work / 'payload/kernel.macho.adt.pong'
     command = [sys.executable, str(device / 'scripts/make-pong-adt-ipados18.py'),
+               '--board', args.board,
                '--cpus', str(args.cpus),
                '--dram-size', hex(args.dram_size),
                '--window-size', hex(args.window_size),
@@ -194,21 +255,26 @@ def main():
     write_member(payload, 'EFI/UniXNU/Payloads/pong-boot-manifest.json', manifest)
 
     ramdisk = envelope(payload.read_bytes())
-    image = boot_image(ramdisk)
-    target = work / 'boot/pong-xnu-initial.img'
+    kernel, kernel_record = b'', None
+    if boot['kernel_slot'] == 'firmware':
+        kernel, kernel_record = firmware_kernel(work / 'boot/boot.img', args.abl_dtb)
+    image = boot_image(ramdisk, kernel)
+    target = work / 'boot' / boot['image']
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(image)
     if image[:8] != b'ANDROID!' or struct.unpack_from('<I', image, 40)[0] != 4:
         raise SystemExit('the boot image is not an Android v4 container')
-    if image[HEADER_BYTES:HEADER_BYTES + 8] != MAGIC:
+    ramdisk_at = HEADER_BYTES + len(kernel) + (-len(kernel) % PAGE)
+    if image[ramdisk_at:ramdisk_at + 8] != MAGIC:
         raise SystemExit('the ramdisk does not begin with the PONGFAT1 envelope')
 
-    record = {'generator': 'scripts/make-pong-adt-ipados18.py',
+    note = boot.get('comment') or ('the device boots the UEFI firmware from its own partition; '
+                                   'the ramdisk carries the whole payload')
+    record = {'generator': 'scripts/make-pong-adt-ipados18.py', 'board': args.board,
               'container': {'format': 'android-boot-v4', 'header_bytes': BOOT_HEADER_V4_SIZE,
-                            'kernel_bytes': 0, 'signature_bytes': 0,
+                            'kernel_bytes': len(kernel), 'kernel': kernel_record, 'signature_bytes': 0,
                             'ramdisk_bytes': len(ramdisk), 'image_bytes': len(image),
-                            'note': ('the device boots the UEFI firmware from its own partition; '
-                                     'the ramdisk carries the whole payload')},
+                            'note': note},
               'parameters': {'dram_size': hex(args.dram_size), 'window_size': hex(args.window_size),
                              'cpus': args.cpus, 'unique_chip_id': args.unique_chip_id, 'chip_id': chip_id,
                              'ufs_probe': bool(args.ufs_probe),
@@ -228,7 +294,7 @@ def main():
         package = json.loads(manifest_path.read_text())
         outputs = package.setdefault('outputs', {})
         for key, path in (('boot.img', work / 'boot/boot.img'), ('payload.img', payload),
-                          ('pong-xnu-initial.img', target)):
+                          (boot['image'], target)):
             if path.is_file():
                 outputs[key] = {'bytes': path.stat().st_size, 'sha256': sha256(path)}
         manifest_path.write_text(json.dumps(package, indent=2, sort_keys=True) + '\n')
