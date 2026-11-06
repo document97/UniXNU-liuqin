@@ -9,7 +9,7 @@ Reserved is the union of
   * the reserved-memory of the pinned mainline liuqin tree (the SM8450 base, the SM8475
     deletions and the liuqin overrides, yzddmr6/linux-sm8450-liuqin
     fe81794b5e1b8a3f11a165f3acbfdb8fa671dbb3; --fetch caches it in reference/mainline),
-  * the stock UEFI reservations of liuqin's uefiplat.cfg (OS3.0.7.0.VMYCNXM), and
+  * the stock UEFI reservations of the tablet's own uefiplat.cfg (V14.0.9.0.TMYCNXM), and
   * the vendor runtime reservations of the same SM8475 BSP captured on pong
     (configs/pong-memory-sm8475.json).
 A union only over-reserves. The kernel side intersects every allocatable range with the
@@ -50,15 +50,33 @@ DRAM_8GB = [
     (0x840000000, 0x140000000),
 ]
 
-# uefiplat.cfg of OS3.0.7.0.VMYCNXM (UniXNU-liuqin docs/vendor-inputs.md): every region
-# the stock firmware keeps from the OS, including its own FD and the ABL splash.
+# [MemoryMap] of the stock uefiplat.cfg (uefi_a, FFS DDE58710-41CD-4306-DBFB-3FA90BB1D2DD)
+# of V14.0.9.0.TMYCNXM, the build on the tablet being ported: every Reserv and RtData
+# region, the stock FD window (liuqinPkg's FD sits inside it) and the ABL splash. Left out:
+# the Conv regions (XBL RAMDUMP, DBI Dump, DXE Heap), the BsData working memory of the
+# stock UEFI (CPU Vectors, MMU PageTables, UEFI Stack, SEC/Sched Heap, FV Region, UEFI RESV),
+# which liuqinPkg replaces with its own, and "Kernel" 0xA8000000 +0x10000000, the load
+# window of the stock LinuxLoader. HYP, PIL, Demura, UEFI FD and Display Reserved are the
+# same in OS3.0.7.0.VMYCNXM (UniXNU-liuqin docs/vendor-inputs.md).
 UEFIPLAT = [
     ("uefiplat:HYP", 0x80000000, 0x00600000),
+    ("uefiplat:DT BLOB", 0x80600000, 0x00040000),
+    ("uefiplat:AOP", 0x80800000, 0x000A0000),
+    ("uefiplat:SMEM", 0x80900000, 0x00200000),
+    ("uefiplat:CUCP", 0x80B00000, 0x00100000),
     ("uefiplat:PIL Reserved", 0x85200000, 0x1DC00000),
     ("uefiplat:Display Demura", 0xA1400000, 0x02B00000),
     ("uefiplat:UEFI FD", 0xA7000000, 0x00400000),
     ("uefiplat:UEFI FD Reserved", 0xA7400000, 0x00200000),
+    ("uefiplat:Info Blk", 0xA7601000, 0x00001000),
+    ("uefiplat:Log Buffer", 0xA7605000, 0x00008000),
     ("uefiplat:Display Reserved", 0xB8000000, 0x02B00000),
+    ("uefiplat:OEM VM", 0xBB000000, 0x05000000),
+    ("uefiplat:MTE Reserved", 0xC0000000, 0x20000000),
+    ("uefiplat:VM PIL", 0xE0000000, 0x05700000),
+    ("uefiplat:TZ STATS", 0xE8800000, 0x01000000),
+    ("uefiplat:TZApps Reserved", 0xEA000000, 0x07400000),
+    ("uefiplat:HYP Reserved", 0x830000000, 0x10000000),
 ]
 
 
@@ -122,10 +140,41 @@ def subtract(banks, holes):
     return sorted((b, s) for b, s in free if s >= 0x1000)
 
 
+def dts_block(dram, reserved) -> str:
+    """The memory node and reserved-memory of dts/liuqin.dts: every distinct reserved range in
+    (base, size) order, no-map; an exact duplicate keeps the first source's name."""
+    def cells(v):
+        return f"{v >> 32:#x} {v & 0xFFFFFFFF:#x}"
+    lines = ["    /* 8 GB unit, stock ABL /memory. */",
+             '    memory@80000000 { device_type = "memory"; reg = <'
+             + " ".join(f"{cells(b)} {cells(s)}" for b, s in sorted(dram)) + ">; };",
+             "    reserved-memory {",
+             "        #address-cells = <2>;",
+             "        #size-cells = <2>;",
+             "        ranges;"]
+    kept: dict[tuple[int, int], str] = {}
+    for name, base, size in sorted(reserved, key=lambda r: (r[1], r[2])):
+        kept.setdefault((base, size), name)
+    kept = [(n, b, s) for (b, s), n in kept.items()]
+    for i, (name, base, size) in enumerate(kept):
+        lines.append(f"        region{i}@{base:x} {{ reg = <{cells(base)} {cells(size)}>; no-map; }}; /* {name} */")
+    lines.append("    };")
+    return "\n".join(lines) + "\n"
+
+
+def write_dts(path: Path, block: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    start = text.index("    /* 8 GB unit, stock ABL /memory. */")
+    end = text.index("\n    };\n", text.index("    reserved-memory {", start)) + len("\n    };\n")
+    path.write_text(text[:start] + block + text[end:], encoding="utf-8", newline="\n")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dram", help="comma separated base:size pairs, default the measured 8 GB unit")
     ap.add_argument("--out", type=Path, default=ROOT / "configs" / "liuqin-memory-sm8475.json")
+    ap.add_argument("--dts", type=Path, default=ROOT / "dts" / "liuqin.dts",
+                    help="rewrite the memory and reserved-memory of this DTS (empty to skip)")
     ap.add_argument("--fetch", action="store_true", help="download the pinned mainline files into reference/mainline")
     args = ap.parse_args()
     if args.fetch:
@@ -143,7 +192,7 @@ def main() -> int:
         "board": "liuqin",
         "physical_bytes": sum(s for _, s in dram),
         "source": "DRAM: stock ABL /memory of the 8 GB unit (iPadOS-liuqin NOTES 6.2); reserved: union of "
-                  "mainline liuqin fe81794b, stock uefiplat.cfg OS3.0.7.0.VMYCNXM and the pong SM8475 capture",
+                  "mainline liuqin fe81794b, stock uefiplat.cfg V14.0.9.0.TMYCNXM and the pong SM8475 capture",
         "dram": [{"base": hex(b), "size": hex(s)} for b, s in sorted(dram)],
         "reserved": [{"name": n, "base": hex(b), "size": hex(s)} for n, b, s in reserved],
         "allocatable": [{"base": hex(b), "size": hex(s)} for b, s in allocatable],
@@ -151,6 +200,8 @@ def main() -> int:
                   "at runtime; never reclaim BootServices/RuntimeServices or reserved descriptors",
     }
     args.out.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8", newline="\n")
+    if args.dts:
+        write_dts(args.dts, dts_block(dram, reserved))
     total = sum(s for _, s in allocatable)
     print(f"{args.out.name}: {len(dram)} banks {doc['physical_bytes'] / 2**30:.2f} GiB, "
           f"{len(reserved)} reserved, {len(allocatable)} allocatable ranges {total / 2**30:.2f} GiB")

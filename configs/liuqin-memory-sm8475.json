@@ -2,7 +2,7 @@
   "format": "pong-sm8475-dram-v1",
   "board": "liuqin",
   "physical_bytes": 8389656576,
-  "source": "DRAM: stock ABL /memory of the 8 GB unit (iPadOS-liuqin NOTES 6.2); reserved: union of mainline liuqin fe81794b, stock uefiplat.cfg OS3.0.7.0.VMYCNXM and the pong SM8475 capture",
+  "source": "DRAM: stock ABL /memory of the 8 GB unit (iPadOS-liuqin NOTES 6.2); reserved: union of mainline liuqin fe81794b, stock uefiplat.cfg V14.0.9.0.TMYCNXM and the pong SM8475 capture",
   "dram": [
     {
       "base": "0x80000000",
@@ -47,6 +47,11 @@
       "size": "0x40000"
     },
     {
+      "name": "uefiplat:DT BLOB",
+      "base": "0x80600000",
+      "size": "0x40000"
+    },
+    {
       "name": "pong:xbl_dtlog_region@80600000",
       "base": "0x80600000",
       "size": "0x40000"
@@ -65,6 +70,11 @@
       "name": "pong:aop_image_region@80800000",
       "base": "0x80800000",
       "size": "0x60000"
+    },
+    {
+      "name": "uefiplat:AOP",
+      "base": "0x80800000",
+      "size": "0xa0000"
     },
     {
       "name": "mainline:memory@80860000",
@@ -122,12 +132,22 @@
       "size": "0x200000"
     },
     {
+      "name": "uefiplat:SMEM",
+      "base": "0x80900000",
+      "size": "0x200000"
+    },
+    {
       "name": "pong:smem_region@80900000",
       "base": "0x80900000",
       "size": "0x200000"
     },
     {
       "name": "mainline:memory@80b00000",
+      "base": "0x80b00000",
+      "size": "0x100000"
+    },
+    {
+      "name": "uefiplat:CUCP",
       "base": "0x80b00000",
       "size": "0x100000"
     },
@@ -332,6 +352,16 @@
       "size": "0x200000"
     },
     {
+      "name": "uefiplat:Info Blk",
+      "base": "0xa7601000",
+      "size": "0x1000"
+    },
+    {
+      "name": "uefiplat:Log Buffer",
+      "base": "0xa7605000",
+      "size": "0x8000"
+    },
+    {
       "name": "pong:bootloader_log_region@A7605000",
       "base": "0xa7605000",
       "size": "0x8000"
@@ -357,7 +387,17 @@
       "size": "0x5000000"
     },
     {
+      "name": "uefiplat:OEM VM",
+      "base": "0xbb000000",
+      "size": "0x5000000"
+    },
+    {
       "name": "mainline:memory@c0000000",
+      "base": "0xc0000000",
+      "size": "0x20000000"
+    },
+    {
+      "name": "uefiplat:MTE Reserved",
       "base": "0xc0000000",
       "size": "0x20000000"
     },
@@ -365,6 +405,11 @@
       "name": "mainline:memory@e0000000",
       "base": "0xe0000000",
       "size": "0x600000"
+    },
+    {
+      "name": "uefiplat:VM PIL",
+      "base": "0xe0000000",
+      "size": "0x5700000"
     },
     {
       "name": "mainline:memory@e0600000",
@@ -427,6 +472,11 @@
       "size": "0x100000"
     },
     {
+      "name": "uefiplat:TZ STATS",
+      "base": "0xe8800000",
+      "size": "0x1000000"
+    },
+    {
       "name": "mainline:memory@e8900000",
       "base": "0xe8900000",
       "size": "0x1200000"
@@ -452,6 +502,11 @@
       "size": "0x3900000"
     },
     {
+      "name": "uefiplat:TZApps Reserved",
+      "base": "0xea000000",
+      "size": "0x7400000"
+    },
+    {
       "name": "mainline:memory@ed900000",
       "base": "0xed900000",
       "size": "0x3b00000"
@@ -460,6 +515,11 @@
       "name": "mainline:memory@f8700000",
       "base": "0xf8700000",
       "size": "0x280000"
+    },
+    {
+      "name": "uefiplat:HYP Reserved",
+      "base": "0x830000000",
+      "size": "0x10000000"
     }
   ],
   "allocatable": [
@@ -477,7 +537,11 @@
     },
     {
       "base": "0xa7600000",
-      "size": "0x5000"
+      "size": "0x1000"
+    },
+    {
+      "base": "0xa7602000",
+      "size": "0x3000"
     },
     {
       "base": "0xa760d000",
@@ -501,11 +565,7 @@
     },
     {
       "base": "0x800000000",
-      "size": "0x39700000"
-    },
-    {
-      "base": "0x839d00000",
-      "size": "0x1e00000"
+      "size": "0x30000000"
     },
     {
       "base": "0x840000000",
