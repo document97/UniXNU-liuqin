@@ -36,10 +36,12 @@ SoC 层的实现（CPU、GIC、UFS、PMIC 按键、Adreno 730、QCA6490、Darwin
 
 ### 阶段 1：UEFI 和启动菜单（只用 `fastboot boot`，不写任何分区）
 
+0. 在 `uefi-liuqin` 的 Settings → Secrets and variables → Actions 里添加 secret
+   `LIUQIN_ARTIFACT_PASSWORD`（至少 12 位）。仓库是公开的，产物只以这个密码加密的 7z 上传，没有它工作流会直接停下。
 1. 准备一个 liuqin 的**完整 OTA 包**（小米 recovery 卡刷包，里面有 `payload.bin`）的下载链接或本地文件。
 2. 在你 fork 的 `uefi-liuqin` 上运行 Actions → **liuqin UEFI**，填入 `ota_url`。
    `binaries` 先选 `pong`（公开的 SM8475 模块）；不行再选 `liuqin`（从 OTA 的 uefi 分区导入原厂模块）。
-3. 下载产物里的 `Mu-liuqin.img`，平板进 fastboot 后：
+3. 下载产物，用 `7z x liuqin-uefi.7z` 输入密码解出 `Mu-liuqin.img`，平板进 fastboot 后：
 
    ```sh
    fastboot boot Mu-liuqin.img
@@ -73,7 +75,7 @@ Wi-Fi（QCA6490，需要 liuqin 的板级数据）→ 音频（4 颗 CS35L41）�
 ## 风险提示
 
 - 全程只用 `fastboot boot` 在内存里启动，不写 boot 分区；只有阶段 2 安装系统卷时才会写 **userdata**，会清空平板数据。
-- 本仓库不包含 Apple、小米或高通的二进制。CI 产物里带有从 OTA 提取的厂商文件，下载后请删除对应的 run。
+- 本仓库不包含 Apple、小米或高通的二进制。CI 产物里带有从 OTA 提取的厂商文件，只以加密 7z 上传、保留 1 天；下载后请删除对应的 run。
 - 在非 Apple 硬件上运行 iPadOS 违反 Apple 软件许可协议，仅用于研究。
 
 ## 致谢
