@@ -26,6 +26,9 @@ SoC 层的实现（CPU、GIC、UFS、PMIC 按键、Adreno 730、QCA6490、Darwin
 | UEFI | liuqinPkg：FD 0xA7100000/3 MiB、SimpleFb GOP、厂商模块可选 pong 或 liuqin 原厂 | uefi-liuqin |
 | 启动 DTB | 原厂 vendor_boot 里的 “Cape SoC” 基础 DTB（ABL 按 msm-id/board-id 选择） | `tools/fetch-liuqin-stock.py` |
 
+主线 DTS（GPL-2.0）不随仓库提交；重新生成内存表时用
+`python3 scripts/gen-liuqin-memory.py --fetch`，它会把固定版本 fe81794b 的三个文件下载到被忽略的 `reference/mainline/`。
+
 `scripts/make-pong-adt-ipados18.py` 新增 `--board`（或环境变量 `UNIXNU_SM8475_BOARD`），
 从 `configs/<board>-board.json` 读取板级数据；不传时仍是 pong，输出不变。
 

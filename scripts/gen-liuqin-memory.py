@@ -6,9 +6,9 @@ development loader (iPadOS-liuqin NOTES.md 6.2, five banks with 2/2 cells). The 
 variant adds a bank; pass --dram to describe another unit.
 
 Reserved is the union of
-  * the reserved-memory of the pinned mainline liuqin tree (reference/mainline: the SM8450
-    base, the SM8475 deletions and the liuqin overrides, yzddmr6/linux-sm8450-liuqin
-    fe81794b5e1b8a3f11a165f3acbfdb8fa671dbb3),
+  * the reserved-memory of the pinned mainline liuqin tree (the SM8450 base, the SM8475
+    deletions and the liuqin overrides, yzddmr6/linux-sm8450-liuqin
+    fe81794b5e1b8a3f11a165f3acbfdb8fa671dbb3; --fetch caches it in reference/mainline),
   * the stock UEFI reservations of liuqin's uefiplat.cfg (OS3.0.7.0.VMYCNXM), and
   * the vendor runtime reservations of the same SM8475 BSP captured on pong
     (configs/pong-memory-sm8475.json).
@@ -25,7 +25,22 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# A local cache (reference/ is ignored): sm8475-xiaomi-liuqin.dts is GPL-2.0-only and is
+# not committed here; --fetch downloads the pinned files.
 MAINLINE = ROOT / "reference" / "mainline"
+MAINLINE_COMMIT = "fe81794b5e1b8a3f11a165f3acbfdb8fa671dbb3"
+MAINLINE_URL = ("https://raw.githubusercontent.com/yzddmr6/linux-sm8450-liuqin/"
+                f"{MAINLINE_COMMIT}/arch/arm64/boot/dts/qcom/")
+MAINLINE_FILES = ("sm8450.dtsi", "sm8475.dtsi", "sm8475-xiaomi-liuqin.dts")
+
+
+def fetch_mainline() -> None:
+    import urllib.request
+    MAINLINE.mkdir(parents=True, exist_ok=True)
+    for name in MAINLINE_FILES:
+        with urllib.request.urlopen(MAINLINE_URL + name, timeout=60) as r:
+            (MAINLINE / name).write_bytes(r.read())
+        print(f"fetched {name} at {MAINLINE_COMMIT[:8]}")
 
 DRAM_8GB = [
     (0x80000000, 0x6A000000),
@@ -111,7 +126,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dram", help="comma separated base:size pairs, default the measured 8 GB unit")
     ap.add_argument("--out", type=Path, default=ROOT / "configs" / "liuqin-memory-sm8475.json")
+    ap.add_argument("--fetch", action="store_true", help="download the pinned mainline files into reference/mainline")
     args = ap.parse_args()
+    if args.fetch:
+        fetch_mainline()
+    missing = [n for n in MAINLINE_FILES if not (MAINLINE / n).is_file()]
+    if missing:
+        raise SystemExit(f"{MAINLINE} lacks {missing}: run with --fetch")
     dram = DRAM_8GB
     if args.dram:
         dram = [tuple(int(v, 0) for v in pair.split(":")) for pair in args.dram.split(",")]
