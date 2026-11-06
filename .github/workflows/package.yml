@@ -371,6 +371,12 @@ jobs:
           # installs them: the image's own copies are used, and the llvm keg is put
           # on PATH rather than linked.
           brew install dtc lzfse mtools nasm acpica
+          # The macos-15 image of 2026-08 no longer carries the lld keg; the formula
+          # links to /usr/local/opt/lld, which is LLD_KEG.
+          if [ ! -x "${LLD_KEG}/bin/lld-link" ]; then
+            brew install lld
+            ls "${LLD_KEG}/bin/"
+          fi
           ok=1
           for t in dtc lzfse mformat mcopy nasm iasl cmake ninja make unifdef python3; do
             command -v "$t" >/dev/null || { echo "missing tool: $t"; ok=0; }
