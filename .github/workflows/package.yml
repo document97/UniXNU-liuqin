@@ -498,6 +498,25 @@ jobs:
             printf 'PONG_VOLUME_LAYOUT=%s\n' "$PWD/ci-volume-layout.json"
             printf 'PATH=%s:%s:%s\n' "${LLVM_KEG}/bin" "${LLD_KEG}/bin" "$PATH"
           } >> "$GITHUB_ENV"
+      - name: original 22H374 kernelcache
+        run: |
+          set -euo pipefail
+          # The kit's storage step (prepare-ipados18-storage.py) derives the
+          # IOStorageFamily bindings from the original kernelcache, so the kernel
+          # build needs it even without prelink. `unixnu ipsw fetch` reads only
+          # the KernelCache member of the board.toml [ipsw] URL with range requests
+          # and decompresses it. It stays on the runner; nothing uploads it.
+          cache="$(python3 UniXNU/unixnu ipsw fetch KernelCache -D device --os "${OS_PROFILE}" | tail -1)"
+          target=device/apple/ipados18-22H374/components/kernelcache.release.ipad7c.decompressed
+          mkdir -p "$target"
+          cp -f "$cache" "$target/kernelcache.release.ipad7c.decompressed"
+          python3 - "$target/kernelcache.release.ipad7c.decompressed" <<'PY'
+          import hashlib, sys
+          data = open(sys.argv[1], 'rb').read()
+          if data[:4] != b'\xcf\xfa\xed\xfe':
+              raise SystemExit('the kernelcache is not a 64-bit Mach-O')
+          print('kernelcache', len(data), 'bytes, sha256', hashlib.sha256(data).hexdigest()[:16])
+          PY
       - name: package
         working-directory: device
         env:
