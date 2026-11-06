@@ -38,9 +38,11 @@ SoC 层的实现（CPU、GIC、UFS、PMIC 按键、Adreno 730、QCA6490、Darwin
 
 0. 在 `uefi-liuqin` 的 Settings → Secrets and variables → Actions 里添加 secret
    `LIUQIN_ARTIFACT_PASSWORD`（至少 12 位）。仓库是公开的，产物只以这个密码加密的 7z 上传，没有它工作流会直接停下。
-1. 准备一个 liuqin 的**完整 OTA 包**（小米 recovery 卡刷包，里面有 `payload.bin`）的下载链接或本地文件。
-2. 在你 fork 的 `uefi-liuqin` 上运行 Actions → **liuqin UEFI**，填入 `ota_url`。
-   `binaries` 先选 `pong`（公开的 SM8475 模块）；不行再选 `liuqin`（从 OTA 的 uefi 分区导入原厂模块）。
+1. 原厂输入（Cape DTB 和 `uefi.elf`）取自平板当前版本 **V14.0.9.0.TMYCNXM** 的线刷包，
+   以同一密码加密成 7z，放在 `uefi-liuqin` 的 Release `stock-V14.0.9.0.TMYCNXM`，工作流默认使用它。
+   换版本时，也可以填 `ota_url`，改用小米完整 OTA 包（里面有 `payload.bin`）。
+2. 在 `uefi-liuqin` 上运行 Actions → **liuqin UEFI**。
+   `binaries` 先选 `pong`（公开的 SM8475 模块）；不行再选 `liuqin`（从原厂 `uefi.elf` 导入原厂模块，本地测试 96 个里匹配到 93 个，缺的 3 个是 pong 专有或不需要的）。
 3. 下载产物，用 `7z x liuqin-uefi.7z` 输入密码解出 `Mu-liuqin.img`，平板进 fastboot 后：
 
    ```sh
