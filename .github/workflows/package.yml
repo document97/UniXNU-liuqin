@@ -446,7 +446,11 @@ jobs:
           print('configuration %s -> %s' % (profile, mapping[profile]))
           PY
       - name: install the OS profile and the component recipe
-        run: python3 device/scripts/install-unixnu-inputs.py --unixnu UniXNU
+        run: |
+          set -euo pipefail
+          python3 device/scripts/install-unixnu-inputs.py --unixnu UniXNU
+          # XNU 11417 has no BCM2837 machine config; the kit recipe builds PONG.
+          python3 device/scripts/patch-unixnu-kernel-step.py --unixnu UniXNU
       - name: build inputs
         run: |
           set -euo pipefail
@@ -502,6 +506,7 @@ jobs:
           UNIXNU_DEVICE: ${{ github.workspace }}/device
           PONG_VOLUME_LAYOUT: ${{ github.workspace }}/ci-volume-layout.json
           PONG_LLVM: ${{ env.LLVM_KEG }}/bin
+          UNIXNU_SHARED_XNU_BUILD: '0'
         run: |
           set -euo pipefail
           args=(--os "${OS_PROFILE}" --uefi ../uefi-liuqin -j 3 --unique-chip-id "${UNIXNU_UNIQUE_CHIP_ID}")
