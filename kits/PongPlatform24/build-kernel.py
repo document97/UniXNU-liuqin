@@ -83,7 +83,12 @@ def hardware_dtb(device, tree, given=None):
         raise SystemExit('dtc is missing; install it (brew install dtc)')
     for item in spec.get('include_dirs', []):
         kind, _, relative = item.partition(':')
-        directory = device / relative if kind == 'device' else tree / relative
+        # soc: is the sm8475 feed (feeds.toml), the soc-seed directory that this
+        # repository also carries; `release` resolves it to the fetched copy,
+        # which this recipe is not told about.
+        directory = (device / relative if kind == 'device'
+                     else device / 'migration/format2/soc-seed' / relative if kind == 'soc'
+                     else tree / relative)
         if not directory.is_dir():
             raise SystemExit(f'{directory} missing: [device_tree] include_dirs names it')
         command += ['-i', str(directory)]
