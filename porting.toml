@@ -30,9 +30,9 @@ configuration = ["FD 0xA7100000 +0x300000 inside the stock UEFI FD window; Simpl
 procedure = ["tools/fetch-liuqin-stock.py extracts vendor_boot, uefi and dtbo from a full OTA package and selects the Cape SoC DTB.", "uefi-liuqin .github/workflows/liuqin-uefi.yml builds the firmware and the v4 boot image."]
 findings = ["The stock PIL Reserved (0x85200000 +0x1DC00000) overlaps Display Demura; the first-listed-wins union equals the pong descriptors' union 0x85200000-0xA3F00000.", "A previous liuqin attempt with a Cape DTB from vendor_boot reached the DarwinBoot handoff (1696108518/UniXNU-liuqin docs/liuqin-boot-progress.md)."]
 completion = ["fastboot boot of Mu-liuqin.img shows the UniXNU menu; with a payload it lists the entry and DarwinBoot hands off."]
-limits = ["Not built or booted here; the host had no EDK II toolchain."]
+limits = ["Built, not yet booted: the tablet's bootloader is still locked."]
 next_action = ["Boot Mu-liuqin.img from the stage-1 workflow and photograph the panel."]
-evidence = [{kind = "source", reference = "tools/fetch-liuqin-stock.py", result = "Host test with a synthetic full OTA (stored zip, REPLACE and REPLACE_XZ, three base DTBs) wrote byte-identical partitions and selected the Cape SoC DTB."}]
+evidence = [{kind = "source", reference = "tools/fetch-liuqin-stock.py", result = "Host test with a synthetic full OTA (stored zip, REPLACE and REPLACE_XZ, three base DTBs) wrote byte-identical partitions and selected the Cape SoC DTB."}, {kind = "build", reference = "Document97/uefi-liuqin run 42217454136 (77d2250, binaries=pong, DEBUG)", result = "Mu-liuqin.img: boot header v4, kernel gzip(BootShim + 3 MiB FD) with the appended DTB byte-identical to the Cape SoC DTB of the V14.0.9.0.TMYCNXM vendor_boot."}]
 
 [[area]]
 id = "memory"
