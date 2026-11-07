@@ -64,7 +64,15 @@ dsc = "Platforms/Xiaomi/liuqinPkg/liuqin.dsc"
 fd = "Build/liuqinPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
 # Runs in the build tree before the firmware build and writes the device tree the boot image
 # carries; [bootimg] dtb names the same path.
-preflight = ["scripts/build-pong-hardware-dtb.py --source dts/liuqin.dts --output build/liuqin/liuqin.dtb"]
+preflight = [
+  "scripts/build-pong-hardware-dtb.py --source dts/liuqin.dts --output build/liuqin/liuqin.dtb",
+  # Unpacking the firmware stops with "error 000E: One Path in PACKAGES_PATH
+  # doesn't exist": schema 2 links only the component catalog's modules into the
+  # tree, and this board's catalog carries the kit alone, so {tree}/drivers holds
+  # no DarwinBoot24 while [firmware] packages names it. The preflight copies the
+  # driver in from the device repository before EDK II checks the paths.
+  "scripts/prepare-liuqin-firmware-packages.py",
+]
 patches = [
   "Resources/MuPatches/AsmMacroLib.patch",
   "Resources/MuPatches/Auth-Service.patch",
