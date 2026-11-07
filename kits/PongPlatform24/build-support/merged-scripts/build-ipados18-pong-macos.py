@@ -10,7 +10,11 @@ def link(src,dst):
     src=src.resolve()
     if dst.is_symlink() and dst.resolve()==src:return
     if dst.exists() or dst.is_symlink():raise RuntimeError(f'Existing path differs: {dst}')
-    dst.parent.mkdir(parents=True,exist_ok=True);dst.symlink_to(src,target_is_directory=src.is_dir())
+    dst.parent.mkdir(parents=True,exist_ok=True)
+    if src.is_dir():
+        shutil.copytree(src,dst,symlinks=False)
+    else:
+        shutil.copy2(src,dst)
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
