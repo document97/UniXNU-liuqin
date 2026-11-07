@@ -32,7 +32,7 @@ findings = ["The stock PIL Reserved (0x85200000 +0x1DC00000) overlaps Display De
 completion = ["fastboot boot of Mu-liuqin.img shows the UniXNU menu; with a payload it lists the entry and DarwinBoot hands off."]
 limits = ["Built, not yet booted: the tablet's bootloader is still locked."]
 next_action = ["Boot Mu-liuqin.img from the stage-1 workflow and photograph the panel."]
-evidence = [{kind = "source", reference = "tools/fetch-liuqin-stock.py", result = "Host test with a synthetic full OTA (stored zip, REPLACE and REPLACE_XZ, three base DTBs) wrote byte-identical partitions and selected the Cape SoC DTB."}, {kind = "build", reference = "Document97/uefi-liuqin run 42217454136 (77d2250, binaries=pong, DEBUG)", result = "Mu-liuqin.img: boot header v4, kernel gzip(BootShim + 3 MiB FD) with the appended DTB byte-identical to the Cape SoC DTB of the V14.0.9.0.TMYCNXM vendor_boot."}]
+evidence = [{kind = "source", reference = "tools/fetch-liuqin-stock.py", result = "Host test with a synthetic full OTA (stored zip, REPLACE and REPLACE_XZ, three base DTBs) wrote byte-identical partitions and selected the Cape SoC DTB."}, {kind = "source", reference = "https://github.com/Document97/uefi-liuqin/actions/runs/42217454136", result = "Run 42217454136 (77d2250, binaries=pong, DEBUG): Mu-liuqin.img with boot header v4 and the kernel gzip(BootShim + 3 MiB FD) followed by a DTB byte-identical to the Cape SoC DTB of the V14.0.9.0.TMYCNXM vendor_boot."}]
 
 [[area]]
 id = "memory"
@@ -74,7 +74,7 @@ findings = ["Same SPI engine and IRQ line as pong; the TDDI die is reset by the 
 completion = ["Touches reach SpringBoard; keys lock and change volume."]
 limits = ["No touch on first boot."]
 next_action = ["Write the NT36532 transport after the desktop is reached."]
-evidence = [{kind = "source", reference = "yzddmr6/linux-sm8450-liuqin@fe81794b arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts", result = "touchscreen@0 on spi4, IRQ gpio21, no reset gpio."}]
+evidence = [{kind = "source", reference = "dts/liuqin.dts", result = "liuqin-touch records the mainline node's wiring: touchscreen@0 on spi4 (0x990000), IRQ gpio21, no reset gpio, firmware novatek_nt36532_m81_fw_csot.bin (mainline sm8475-xiaomi-liuqin.dts:1376-1415, cited in the node comment)."}]
 
 [[area]]
 id = "storage"
@@ -84,7 +84,7 @@ paths = ["board.toml"]
 inputs = ["UFS host 0x1d84000, SID 0xe0, SPI 265 (same SoC); this tablet's GPT"]
 configuration = ["[userdata] first_lba/last_lba must be read from this tablet's GPT before a userdata image is built"]
 procedure = ["Read the userdata entry with sgdisk or the stock partition table, update board.toml, then build the userdata image."]
-findings = []
+findings = ["board.toml [userdata] still carries pong's 0x413248..0x75A40EA window: this tablet's GPT has not been read, and the install scripts compare the two before they write anything."]
 completion = ["The root and Data volumes mount from UFS."]
 limits = ["board.toml still holds pong's userdata geometry; the install scripts compare it with the device GPT and stop on a mismatch."]
 next_action = ["Record this tablet's userdata LBAs."]
@@ -98,8 +98,92 @@ paths = [".github/workflows/package.yml", "scripts/finalize-pong-adt.py"]
 inputs = ["pong package workflow (macOS runner): kernel, payload, PONGFAT1 boot image"]
 configuration = ["Stage 2 runs the same workflow with the liuqin board, firmware and Cape DTB"]
 procedure = ["Point package.yml at uefi-liuqin and the Cape DTB, pass --board liuqin to the ADT step and 8 GiB of DRAM."]
-findings = []
+findings = ["The kernel aggregate, the 96 MiB payload and the hardware DTB build in CI; the run then stops in the firmware step because the shared tree has no driver package to put on PACKAGES_PATH.", "The bootable image is a v4 container assembled outside `release`: gzip(BootShim + FD) plus the stock Cape SoC DTB in the kernel slot, PONGFAT1 payload in the ramdisk slot, so one `fastboot boot` from the stock ABL is enough."]
 completion = ["boot/liuqin-xnu-initial.img boots to launchd."]
-limits = ["finalize-pong-adt.py still writes pong paths and 12 GiB of DRAM."]
-next_action = ["Adapt finalize-pong-adt.py and package.yml after stage 1 passes."]
-evidence = [{kind = "source", reference = ".github/workflows/package.yml", result = "Unchanged pong workflow; liuqin stage 2 pending."}]
+limits = ["The liuqin driver package is not linked into the shared tree: schema 2 links the component catalog's modules, and this board's catalog carries the kit alone, so [firmware] packages names {tree}/drivers/DarwinBoot24 with nothing behind it. A firmware preflight copies the tree packages out of the device repository (5d09b75)."]
+next_action = ["Run package.yml past the firmware step and read the products check."]
+evidence = [{kind = "source", reference = ".github/workflows/package.yml", result = "Workflow points at uefi-liuqin and the stock Cape DTB; run 42342204564 built the kernel (kernel.macho sha256 00e8fc0c...), packed the 96 MiB payload and the hardware DTB, then stopped in the firmware build on PACKAGES_PATH."}]
+
+[[area]]
+id = "cpu"
+status = "planned"
+components = ["PongPlatform24"]
+paths = ["board.toml", "dts/liuqin.dts", "configs/liuqin_ipados18_defconfig"]
+inputs = ["SM8475: one Cortex-X3 with three Cortex-A710 and four Cortex-A510 cores, the SoC of pong", "GIC distributor 0x17100000 and redistributors 0x17180000, stride 0x40000, from the stock uefiplat.cfg (same pair pong's ADT encodes)"]
+configuration = ["cpus=1 in [payload] kernel_args for the first boot", "CONFIG_XNU_ARMCPU=y, CONFIG_XNU_NATIVE_ARCH_TIMER=y, ARM_DT_PLATFORM=y, ARMVIRT_PLATFORM=n"]
+procedure = ["Boot one CPU first; raise cpus after the kernel reaches launchd and read the secondary bring-up path of pong's ArmCpu driver on liuqin's GIC bases."]
+findings = ["liuqin shares pong's GIC layout, so the ADT carries the same distributor and redistributor pair with stride 0x40000.", "The first boot runs on one CPU on purpose: the multi-core path is pong's, which no liuqin image has exercised."]
+completion = ["The kernel reaches launchd on all eight CPUs, then on one CPU for the first desktop."]
+limits = ["No SMP bring-up and no cpufreq or OPP data for liuqin yet."]
+next_action = ["Raise cpus in board.toml after the first launchd boot and record the bring-up trace of the secondaries."]
+evidence = [{kind = "source", reference = "board.toml", result = "kernel_args pass cpus=1 for the liuqin first boot."}]
+
+[[area]]
+id = "gpu"
+status = "planned"
+components = ["PongPlatform24"]
+paths = ["board.toml", "configs/liuqin_ipados18_defconfig"]
+inputs = ["Adreno 730 (the GPU of pong), GMU firmware and the a730 ZAP firmware of this board"]
+configuration = ["pong_gpu_scanout=0 and pong_gpu_pool_mib=0: the first boot renders in software into the ABL framebuffer", "CONFIG_XNU_PONG_ADRENO_PLATFORM=n, CONFIG_XNU_NATIVE_ADRENO=n, NATIVE_OFFLINE_GPU=n"]
+procedure = ["Reach the desktop with software rendering; then extract liuqin's signed a730 ZAP firmware from the stock vendor partition and enable the pong A730 path."]
+findings = ["The 22H374 binding profile needs a GPU ABI adaptation before a native Adreno archive can be linked; build-ipados18-pong-macos.py refuses the legacy GPU stages rather than linking them.", "pong's a730 ZAP firmware is signed for pong, so liuqin needs its own before the platform driver can start the GPU."]
+completion = ["SpringBoard renders through the GPU with GPU scanout enabled."]
+limits = ["No GPU acceleration, no Metal device; the first boot uses the software path."]
+next_action = ["Extract liuqin's a730 ZAP firmware and add the ABI adaptation for 22H374."]
+evidence = [{kind = "source", reference = "configs/liuqin_ipados18_defconfig", result = "Adreno stages off: NATIVE_ADRENO=n, PONG_ADRENO_PLATFORM=n, NATIVE_OFFLINE_GPU=n."}]
+
+[[area]]
+id = "network"
+status = "planned"
+components = ["PongPlatform24"]
+paths = ["dts/liuqin.dts", "configs/liuqin_ipados18_defconfig"]
+inputs = ["QCA6490 Wi-Fi on PCIe0, the chip of pong: wlan-enable gpio80, reset gpio94, clkreq gpio95, wake gpio96, xo-clk gpio204", "The board calibration and identity data of this tablet's stock vendor partition"]
+configuration = ["pong_wifi off and CONFIG_XNU_PONG_WIFI=n on the first boot", "&pcie0 enabled with the stock PHY sequence and clock table written into dts/liuqin.dts"]
+procedure = ["Enable PongWifi only after liuqin's calibration data is captured and the GPIO set is compared with pong's, because the driver takes the enable and xo-clk lines as board data."]
+findings = ["The stock device tree wires the same xo-clk line (gpio204) as pong but adds its own reset (gpio94), clkreq (gpio95) and wake (gpio96) lines.", "PongWifi requires PongPower, ArmCpu and NativeUfs, so it can only be enabled after the storage and power bring-up."]
+completion = ["The interface appears and joins a network from SpringBoard."]
+limits = ["No network on the first boot."]
+next_action = ["Capture the stock calibration data and compare the GPIO set with pong's WLAN node."]
+evidence = [{kind = "source", reference = "dts/liuqin.dts", result = "&pcie0 carries wlan-enable-gpios tlmm 80, reset-gpios tlmm 94, clkreq 95, wake 96 and xo-clk 204 for the QCA6490."}]
+
+[[area]]
+id = "audio"
+status = "planned"
+components = ["PongPlatform24"]
+paths = ["board.toml", "configs/liuqin_ipados18_defconfig"]
+inputs = ["CS35L41 smart amplifiers (pong has the TFA9873) and the ADSP audio path"]
+configuration = ["pong_audio=0 and pong_adsp=0 in [payload] kernel_args", "CONFIG_XNU_PONG_POWER=n, so the audio service is off as well"]
+procedure = ["Write a CS35L41 codec layer under the PongAudioService client and enable it together with PongPower, which the audio path depends on."]
+findings = ["PongAudio is written against the TFA9873 register map and cannot drive the CS35L41 without a new codec layer.", "The audio service needs PongPower, which stays off until liuqin's battery and PMIC readings are checked."]
+completion = ["The boot chime and media playback come out of the speakers."]
+limits = ["No audio on the first boot; the ADSP is left off."]
+next_action = ["Compare the CS35L41 register sequence of the stock kernel driver with PongAudioService and port it."]
+evidence = [{kind = "source", reference = "board.toml", result = "kernel_args keep pong_audio=0 and pong_adsp=0 for the first boot."}]
+
+[[area]]
+id = "power"
+status = "planned"
+components = ["PongPlatform24"]
+paths = ["board.toml", "dts/liuqin.dts", "configs/liuqin_ipados18_defconfig"]
+inputs = ["PM8350/PMK8350 family PMICs, the PON and PM8350 GPIO6 keys, battery data through battmgr/ADSP, KTZ8866 backlight on QUP0 i2c1 0x11"]
+configuration = ["CONFIG_XNU_PONG_POWER=n and CONFIG_XNU_PONG_BACKLIGHT=n on the first boot", "pong_buttons=1 keeps power, volume-down and volume-up working without the power service"]
+procedure = ["Read the battery and charger state from liuqin's ADSP interface, then enable PongPower; add the KTZ8866 brightness driver after the desktop is reached."]
+findings = ["PongPower reads pong's PMIC addresses and fuel-gauge path; liuqin reports its battery through battmgr/ADSP, so enabling it before that path is read gives a wrong charge state.", "The stock PON, PON RESIN and PM8350 GPIO6 keys and PPIDs are pong's, so the key path needs no liuqin driver.", "The ABL leaves the KTZ8866 backlight on, so the first boot needs no brightness control."]
+completion = ["Charge level, charger state and brightness follow the system, and the tablet suspends and resumes."]
+limits = ["No battery reading, no charging control and no brightness control on the first boot."]
+next_action = ["Read the ADSP battery interface on liuqin, check the PMIC addresses against PongPower, then enable it."]
+evidence = [{kind = "source", reference = "configs/liuqin_ipados18_defconfig", result = "PONG_POWER=n and PONG_BACKLIGHT=n, with the CS35L41/battery/KTZ8866 reasons recorded above them."}]
+
+[[area]]
+id = "diagnostics"
+status = "planned"
+components = ["PongPlatform24"]
+paths = ["board.toml", "configs/liuqin_ipados18_defconfig"]
+inputs = ["The applog ring of the kernel, the DT panic region and the ramoops region the defconfig records for this board (0xA7000000)"]
+configuration = ["pong_init_trace=1, applog=1 with launchd, backboardd, SpringBoard, containermanagerd, lsd, runningboardd, logd_helper and powerd", "CONFIG_XNU_PONG_RAMOOPS_CONSOLE=n and CONFIG_XNU_PONG_VOLATILE_PANIC_LOG=n: the pong patch writes at 0x85200000, inside liuqin's stock PIL reservation"]
+procedure = ["Read the boot trace through the applog ring; after a panic read the DT panic region. Repoint the ramoops console to the address the defconfig records before enabling it."]
+findings = ["The pong ramoops address 0x85200000 falls inside the stock PIL reservation of liuqin, so the console log stays off until it is repointed.", "The applog list is trimmed to the services the first-boot trace reads, and DarwinBoot copies the line into a 1024-byte buffer, so the assembled command line stays below 1000 bytes."]
+completion = ["A panic and a boot trace can be read from the device without a serial cable."]
+limits = ["No ramoops console; the applog ring is the only trace on the first boot."]
+next_action = ["Repoint the pong ramoops patch at the liuqin address and enable CONFIG_XNU_PONG_RAMOOPS_CONSOLE."]
+evidence = [{kind = "source", reference = "configs/liuqin_ipados18_defconfig", result = "RAMOOPS_CONSOLE=n and VOLATILE_PANIC_LOG=n with the 0x85200000 and 0xA7000000 note above them."}]
