@@ -11,6 +11,9 @@ name: package
 #   * the repository is public, so every artifact that carries Apple or vendor bytes
 #     is uploaded only as AES-256 7z with the secret LIUQIN_ARTIFACT_PASSWORD, and
 #     kept for a short time.
+#   * board firmware comes from the same encrypted stock release: touch/ (NT36532) and
+#     fw/wlan/ (QCA6490) are embedded in the kernel, fw/adsp/ is merged into adsp.mbn
+#     and staged into the OS volume by the userdata job.
 # The pong text below still describes the shared parts.
 
 # docs/porting/packaging.md, plus the artifact that document leaves out: the
