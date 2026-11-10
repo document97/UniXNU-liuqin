@@ -716,12 +716,20 @@ static void brightness18_image(const struct mach_header *header,intptr_t slide)
     uint32_t (*get)(uint32_t,CFDictionaryRef)=dlsym(RTLD_DEFAULT,"IOServiceGetMatchingService");
     int (*release)(uint32_t)=dlsym(RTLD_DEFAULT,"IOObjectRelease");
     if(!matching||!get||!release)return;
-    CFMutableDictionaryRef dict=matching("IOService");
-    const void *key=CFSTR("PongPanel"),*value=CFSTR("NT37705 Visionox / SM8475 DSI0");
-    CFDictionaryRef properties=CFDictionaryCreate(NULL,&key,&value,1,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
-    if(!dict || !properties){if(dict)CFRelease(dict);if(properties)CFRelease(properties);return;}
-    CFDictionarySetValue(dict,CFSTR("IOPropertyMatch"),properties);CFRelease(properties);
-    uint32_t service=get(0,dict);if(!service)return;release(service);
+    // pong publishes the NT37705 DCS service; liuqin its KTZ8866 I2C service (drivers/PongPower/LiuqinBacklight.cpp).
+    static const char *const panels[]={"NT37705 Visionox / SM8475 DSI0","KTZ8866 LCD / liuqin QUP0 SE1"};
+    uint32_t service=0;
+    for(size_t i=0;i<sizeof(panels)/sizeof(panels[0]) && !service;i++) {
+        CFMutableDictionaryRef dict=matching("IOService");
+        CFStringRef name=CFStringCreateWithCString(NULL,panels[i],kCFStringEncodingUTF8);
+        const void *key=CFSTR("PongPanel"),*value=name;
+        CFDictionaryRef properties=name?CFDictionaryCreate(NULL,&key,&value,1,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks):NULL;
+        if(name)CFRelease(name);
+        if(!dict || !properties){if(dict)CFRelease(dict);if(properties)CFRelease(properties);return;}
+        CFDictionarySetValue(dict,CFSTR("IOPropertyMatch"),properties);CFRelease(properties);
+        service=get(0,dict); // consumes dict
+    }
+    if(!service)return;release(service);
     // Same exact 22H374 CoreBrightness UUID and actual Pong panel as below.
     // Its optional telemetry expects DisplayBrightness/NitsPhysical to be a
     // calibration dictionary; the board's native scalar state is not one.

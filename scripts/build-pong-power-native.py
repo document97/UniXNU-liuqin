@@ -46,14 +46,14 @@ def main():
    'static constexpr PongAmpField kPongAmp0[]={{0,0}};\nstatic constexpr PongAmpField kPongAmp1[]={{0,0}};\n')
   print('no TFA98xx container at %s: audio profiles absent (liuqin)'%container)
  objects=[]
- for name in ('QcomSmem.c','QcomSmp2p.c','QcomGlink.c','QcomMdt.c','QcomQmp.c','ShengBattmgr.c','ShengGpr.c','ShengAudioReach.c','GeniI2c.c','PongFirmware.c','PongAdsp.cpp','PongBattery.cpp','PongAudio.cpp','PongAudioService.cpp','PongPower.cpp','PongBacklight.cpp'):
+ for name in ('QcomSmem.c','QcomSmp2p.c','QcomGlink.c','QcomMdt.c','QcomQmp.c','ShengBattmgr.c','ShengGpr.c','ShengAudioReach.c','GeniI2c.c','PongFirmware.c','PongAdsp.cpp','PongBattery.cpp','PongAudio.cpp','PongAudioService.cpp','PongPower.cpp','LiuqinBacklight.cpp'):
   source=ROOT/'drivers/PongPower'/name;obj=out/(source.stem+'.o');cpp=source.suffix=='.cpp'
   cmd=['xcrun','clang++' if cpp else 'clang',*flags,*(['-std=gnu++17','-fno-exceptions','-fno-rtti'] if cpp else []),'-c',str(source),'-o',str(obj)]
   r=subprocess.run(cmd,env=env,capture_output=True,text=True);(out/(source.stem+'.log')).write_text(r.stdout+r.stderr)
   if r.returncode:raise SystemExit(r.stderr)
   if name=='PongBattery.cpp':obj=late_init(obj,name,'PongBatteryStaticInit')
   if name=='PongAudioService.cpp':obj=late_init(obj,name,'PongAudioServiceStaticInit')
-  if name=='PongBacklight.cpp':obj=late_init(obj,name,'PongBacklightStaticInit')
+  if name=='LiuqinBacklight.cpp':obj=late_init(obj,name,'PongBacklightStaticInit')
   objects.append(obj)
  archive=out/'libPongPower.a';archive.unlink(missing_ok=True)
  subprocess.run(['xcrun','libtool','-static','-o',str(archive),*map(str,objects)],env=env,check=True)
