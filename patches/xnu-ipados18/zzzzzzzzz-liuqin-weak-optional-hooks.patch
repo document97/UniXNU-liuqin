@@ -2,9 +2,10 @@ diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
 index 5372d98..1152457 100644
 --- a/bsd/kern/kern_exit.c
 +++ b/bsd/kern/kern_exit.c
-@@ -143,6 +143,33 @@
+@@ -143,6 +143,41 @@
  #if defined(PONG)
  extern void pong_ramoops_diagnostic_write(const char *, int);
++extern void pong_ramoops_console_write(const char *, int);
  
 +/* liuqin: weak defaults for two hooks of optional Pong components, so a
 + * kernel built with XNU_PONG_RAMOOPS_CONSOLE=0 and without the PongPower
@@ -12,6 +13,8 @@ index 5372d98..1152457 100644
 + * replaces each one:
 + * - pong_ramoops_diagnostic_write: arm64/pong_ramoops_console.h (arm_init.o).
 + *   Without the ramoops console there is no reserved buffer to append to.
++ * - pong_ramoops_console_write: the same file; PongBootCapture (linked into
++ *   PongPower) copies its boot log lines there.
 + * - pong_smmu_lease_lock/unlock: PongPower PongPlatformResources.cpp, the
 + *   lock Power/USB/WLAN share for the Apps SMMU. NativeUfs imports them weakly
 + *   for its storage-only profile, where it is the single SMMU owner; a static
@@ -19,6 +22,11 @@ index 5372d98..1152457 100644
 + */
 +__attribute__((weak)) void
 +pong_ramoops_diagnostic_write(const char *text __unused, int length __unused)
++{
++}
++
++__attribute__((weak)) void
++pong_ramoops_console_write(const char *text __unused, int length __unused)
 +{
 +}
 +
