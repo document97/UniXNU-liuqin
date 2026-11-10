@@ -43,7 +43,10 @@ enum Stage {
 };
 constexpr uint64_t kSmem = 0x80900000, kSmemSize = 0x200000, kMutex = 0x1f40000 + 3 * 0x1000, kIpcc = 0x0ed18000, kAoss = 0xc300000;
 constexpr uint64_t kRscDrv = 0x17a20000, kRscTcs = 0xd00, kCmdDb = 0x80860000, kCmdDbSize = 0x20000;
-constexpr uint64_t kAdspBase = 0x85700000, kAdspSize = 0x2800000, kDtbBase = 0x9e980000, kDtbSize = 0x80000;
+// liuqin: the stock Cape FDT reserves adsp_region@9fd00000 (0x3100000); 0x85700000 is its video_region.
+// The liuqin ADSP image (relocatable, PAS1, no separate DTB PAS) spans exactly 0x3100000. Pong used
+// 0x85700000/0x2800000. kDtb* is unused (no adsp_dtb carveout on either board) and kept for reference.
+constexpr uint64_t kAdspBase = 0x9fd00000, kAdspSize = 0x3100000, kDtbBase = 0x9e980000, kDtbSize = 0x80000;
 constexpr uint32_t kPasAdsp = 1, kPasDtb = 36, kRemotePid = 2, kItemIn = 443, kItemOut = 429, kItemCrash = 423;
 constexpr uint32_t kItemGlinkDesc = 478, kItemGlinkTx = 479, kItemGlinkRx = 480, kGlinkFifo = 0x4000;
 constexpr uint32_t kSpiIpcc = 229, kSpiRsc = 5;

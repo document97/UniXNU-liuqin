@@ -1185,6 +1185,22 @@ def apply(a):
         os.chown(job_dir, 0, 0); os.chmod(job_dir, 0o755)
         for p in list(job_dir.glob('*.plist')) + [root / 'System/Library/xpc/launchd.plist']:
             os.chown(p, 0, 0); os.chmod(p, 0o644)
+        # liuqin: board firmware the kernel drivers open at runtime (PongAdsp reads
+        # /pong/firmware/adsp.mbn, PongWifi /pong/firmware/qca6490/*). The CI chain hands it
+        # over as <out>/pong-firmware (prepare-pong-userland-from-ipsw.py --board-firmware);
+        # without it the image simply carries none and the drivers report the missing file.
+        staged_fw = out / 'pong-firmware'
+        if staged_fw.is_dir() and not staged_fw.is_symlink():
+            dest_fw = root / 'pong/firmware'
+            for item in sorted(staged_fw.rglob('*')):
+                if item.is_symlink(): raise RuntimeError('unexpected firmware symlink: ' + str(item))
+                target = dest_fw / item.relative_to(staged_fw)
+                if item.is_dir():
+                    target.mkdir(parents=True, exist_ok=True); os.chmod(target, 0o755)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(item, target); os.chmod(target, 0o644)
+            if dest_fw.is_dir(): os.chmod(dest_fw, 0o755)
         for rel in ('pong', 'sbin/launchd'):
             base = root / rel
             paths = [base] + list(base.rglob('*')) if base.is_dir() else [base]

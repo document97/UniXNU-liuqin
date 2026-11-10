@@ -1,0 +1,23 @@
+liuqin: NT36532 touch driver (bsd/dev/liuqin_nvt.c, copied from drivers/LiuqinTouch by
+build-xnu-ipados18.sh) and its start from bsd_init next to the pong input drivers. It runs only
+when the ADT has /arm-io/liuqin-touch, so pong is unaffected.
+
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -403,4 +403,5 @@
+ bsd/dev/pong_input.c			standard
+ bsd/dev/pong_goodix.c			standard
+ bsd/dev/pong_buttons.c			standard
++bsd/dev/liuqin_nvt.c			standard
+ bsd/kern/kern_event.c			standard
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1173,4 +1173,6 @@
+ 	pong_goodix_init();
+ 		extern void pong_buttons_init(void);
+ 		pong_buttons_init();
++	extern void liuqin_nvt_init(void);
++	liuqin_nvt_init();
+ #endif

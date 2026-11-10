@@ -519,6 +519,8 @@ def main():
                         help='write the volume-layout.json these images imply here as well')
     parser.add_argument('--jobs', type=int, default=8, help='parallel ranges for the IPSW download')
     parser.add_argument('--chunk-mib', type=int, default=64, help='IPSW download chunk size')
+    parser.add_argument('--board-firmware', type=Path,
+                        help='directory mirrored into /pong/firmware on the OS copy (liuqin: adsp.mbn, qca6490/)')
     parser.add_argument('--keep-work', action='store_true',
                         help='keep the downloaded and decrypted intermediates for a post mortem')
     args = parser.parse_args()
@@ -815,9 +817,20 @@ def main():
     # apply refuses a target that is the source file, so the two raw images
     # have to outlive this step; they are removed immediately afterwards.
     rec.stage('apply')
+    if args.board_firmware:
+        source_fw = args.board_firmware.resolve()
+        if not source_fw.is_dir():
+            fail('--board-firmware %s is not a directory' % source_fw)
+        staged_fw = out / 'pong-firmware'
+        if staged_fw.exists():
+            shutil.rmtree(staged_fw)
+        shutil.copytree(source_fw, staged_fw, symlinks=False)
+        report['board_firmware_files'] = sorted(str(p.relative_to(staged_fw)) for p in staged_fw.rglob('*') if p.is_file())
     rec.run('apply userland', root + [str(ROOT / 'userland/build-ipados18.py'),
                                       'apply', '--out', str(out)])
     expect_file(out / 'apply-complete.json', 'apply', 2)
+    # The firmware now lives inside the OS copy; the plaintext staging copy goes.
+    shutil.rmtree(out / 'pong-firmware', ignore_errors=True)
 
     # -- 10. finish -------------------------------------------------------
     rec.stage('finish')

@@ -33,7 +33,7 @@
     "pins": [16, 17, 18, 19, 21, 255],
     "max_x": 1800,
     "max_y": 2880,
-    "comment": "QUP0 SE4 CS0, 9.6 MHz, IRQ gpio21, no reset line; no XNU driver yet, so no driver matches this node"
+    "comment": "QUP0 SE4 CS0, 9.6 MHz, IRQ gpio21, no reset line; read by drivers/LiuqinTouch/liuqin_nvt.c, which checks every value"
   },
   "boot": {
     "comment": "One fastboot boot, RAM only: the stock ABL starts the kernel slot (gzip BootShim + UEFI FD, then the stock Cape SoC DTB it selects by msm-id) and hands the ramdisk (vendor ramdisk of vendor_boot, 21.7 MiB, then the PONGFAT1 payload) to the firmware through /chosen linux,initrd-*; PongBootMemoryDxe scans that range, at most 128 MiB.",

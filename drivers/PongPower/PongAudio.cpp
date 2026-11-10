@@ -417,4 +417,8 @@ void worker(void *,wait_result_t){uint64_t end=nowMs()+90000;while(!up&&nowMs()<
 extern "C" IOBufferMemoryDescriptor *sheng_audio_memory(uint32_t type){if(!serving)return nullptr;auto d=type==0?control:type==1?outRing:nullptr;if(d)d->retain();return d;}
 extern "C" int sheng_audio_request(uint32_t selector){if(!serving)return -6;if(selector>1)return -45;if(selector==0){__atomic_add_fetch(&requestEpoch,1,__ATOMIC_ACQ_REL);__atomic_and_fetch(&ctl->state,~ShengAudioOutputStartFailed,__ATOMIC_RELEASE);}__atomic_store_n(&wanted,selector==0?1u:0u,__ATOMIC_RELEASE);IOLockWakeup(lock,&count,false);return 0;}
 extern "C" bool pong_audio_start_ready(void){return __atomic_load_n(&serving,__ATOMIC_ACQUIRE) && __atomic_load_n(&wanted,__ATOMIC_ACQUIRE) && __atomic_load_n(&startedEpoch,__ATOMIC_ACQUIRE)==__atomic_load_n(&requestEpoch,__ATOMIC_ACQUIRE) && (__atomic_load_n(&ctl->state,__ATOMIC_ACQUIRE)&ShengAudioOutputRunning);}
-extern "C" void sheng_audio_probe(void){unsigned mode=0;PE_parse_boot_argn("pong_audio",&mode,sizeof mode);if(!mode||lock)return;lock=IOLockAlloc();if(!lock)return;const ShengAdspClient client={state,receive};channel=sheng_adsp_channel("adsp_apps",512,20,1,&client,nullptr);thread_t t=nullptr;if(!channel||kernel_thread_start(worker,nullptr,&t)!=KERN_SUCCESS){fail(1,-12);return;}thread_deallocate(t);}
+extern "C" void sheng_audio_probe(void){unsigned mode=0;PE_parse_boot_argn("pong_audio",&mode,sizeof mode);if(!mode||lock)return;
+#if defined(PONG_AMP_PROFILES_ABSENT)
+ IOLog("PongAudio: this build carries no TFA98xx profiles (liuqin uses CS35L41); audio stays off\n");return;
+#endif
+lock=IOLockAlloc();if(!lock)return;const ShengAdspClient client={state,receive};channel=sheng_adsp_channel("adsp_apps",512,20,1,&client,nullptr);thread_t t=nullptr;if(!channel||kernel_thread_start(worker,nullptr,&t)!=KERN_SUCCESS){fail(1,-12);return;}thread_deallocate(t);}

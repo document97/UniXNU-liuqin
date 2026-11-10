@@ -118,8 +118,10 @@ size_mib = 96
 # applog list trimmed to the services the trace reads. DarwinBoot copies the line into a
 # 1024-byte buffer and refuses more than 1000 bytes; keep the final assembled line within1023 bytes.
 kernel_args = [
-  # liuqin first boot: pong arguments with touch, audio, USB and GPU scanout off
-  # (no liuqin driver yet); the UI renders in software on the ABL splash framebuffer.
+  # liuqin first boot: pong arguments with audio, USB and GPU scanout off (no liuqin
+  # driver yet); the UI renders in software on the ABL splash framebuffer. Touch is the
+  # liuqin NT36532 driver (drivers/LiuqinTouch), not pong's Goodix one (pong_touch=0):
+  # liuqin_touch_fw selects the panel's image, 1 CSOT (m81_42_02_0b), 2 Tianma (m81_36_02_0a).
   "keepsyms=1",
   "cpus=1",
   "pong_allow_unauthenticated_root=1",
@@ -131,7 +133,10 @@ kernel_args = [
   "serial=0",
   "pong_disable_swap=1",
   "pong_skip_setup=1",
-  "pong_adsp=0",
+  # 2 starts the ADSP (PAS1) and the PMIC GLINK battery service (CONFIG_XNU_PONG_POWER).
+  "pong_adsp=2",
+  # 1 starts the QCA6490 worker (CONFIG_XNU_PONG_WIFI): PCIe0 link, MHI, ath11k, firmware from the kernel.
+  "pong_wifi=1",
   "pong_audio=0",
   "pong_ufs_readwrite=1",
   "ignition_level=1",
@@ -145,6 +150,9 @@ kernel_args = [
   "pong_software_ui=1",
   "pong_ui_software=1",
   "pong_touch=0",
+  "liuqin_touch=1",
+  "liuqin_touch_fw=1",
+  "liuqin_touch_log=8",
   "pong_buttons=1",
   "pong_init_path=/pong/init",
   "pong_build=ipados18-22H374",

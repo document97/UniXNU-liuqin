@@ -38,7 +38,15 @@ def main():
  sdk=subprocess.check_output(['xcrun','--sdk','iphoneos','--show-sdk-path'],env=env,text=True).strip()
  shared=input_path('sheng_source')/'package'
  flags=['-target','arm64-apple-ios18.0','-isysroot',sdk,'-mkernel','-ffreestanding','-fno-builtin','-fno-stack-protector','-mgeneral-regs-only','-fblocks','-O2','-DKERNEL=1','-DKERNEL_PRIVATE=1','-DXNU_KERNEL_PRIVATE=1','-DARM64_BOARD_CONFIG_PONG=1','-I'+str(framework/'PrivateHeaders'),'-I'+str(framework/'Headers'),'-I'+str(ROOT/'drivers/PongPower'),'-I'+str(out),'-I'+str(shared),'-Wno-deprecated-declarations']
- subprocess.run([os.sys.executable,str(ROOT/'scripts/prepare-pong-audio.py'),'--container',str(input_path('audio_container')),'--output',str(out/'PongAmpProfiles.h')],check=True)
+ container=Path(input_path('audio_container'))
+ if container.is_file():
+  subprocess.run([os.sys.executable,str(ROOT/'scripts/prepare-pong-audio.py'),'--container',str(container),'--output',str(out/'PongAmpProfiles.h')],check=True)
+ else:
+  # liuqin has no TFA98xx container (its amplifiers are CS35L41): emit a placeholder header that
+  # PongAudio refuses at runtime (PONG_AMP_PROFILES_ABSENT), so the ADSP/battery objects still build.
+  (out/'PongAmpProfiles.h').write_text('#define PONG_AMP_PROFILES_ABSENT 1\nstruct PongAmpField {unsigned field,value;};\n'
+   'static constexpr PongAmpField kPongAmp0[]={{0,0}};\nstatic constexpr PongAmpField kPongAmp1[]={{0,0}};\n')
+  print('no TFA98xx container at %s: audio profiles absent (liuqin)'%container)
  objects=[]
  for name in ('QcomRpmh.c','QcomSmem.c','QcomSmp2p.c','QcomGlink.c','QcomMdt.c','QcomQmp.c','ShengBattmgr.c','ShengGpr.c','ShengAudioReach.c','GeniI2c.c','PongFirmware.c','PongAdsp.cpp','PongBattery.cpp','PongAudio.cpp','PongAudioService.cpp','PongPlatformResources.cpp','PongPower.cpp','PongBacklight.cpp'):
   source=(shared if name=='QcomRpmh.c' else ROOT/'drivers/PongPower')/name;obj=out/(source.stem+'.o');cpp=source.suffix=='.cpp'
@@ -51,6 +59,6 @@ def main():
   objects.append(obj)
  archive=out/'libPongPower.a';archive.unlink(missing_ok=True)
  subprocess.run(['xcrun','libtool','-static','-o',str(archive),*map(str,objects)],env=env,check=True)
- (out/'build-report.json').write_text(json.dumps(dict(board='SM8475 Pong',guest='22H374',adsp_pas=1,adsp_carveout=[0x85700000,0x2800000],ipcc=0xed18000,smem=0x80900000,battery='Nothing standard PMIC GLINK, single pack, read only',audio='adsp_apps APM graphs, SID1801, TFA9873 stereo PCM ring; no microphone endpoint',firmware='Local REC image staged to /pong/firmware/adsp.mbn',runtime_observed=False),indent=2)+'\n')
+ (out/'build-report.json').write_text(json.dumps(dict(board='SM8475 liuqin (Pong power stack)',guest='22H374',adsp_pas=1,adsp_carveout=[0x9fd00000,0x3100000],ipcc=0xed18000,smem=0x80900000,battery='Nothing standard PMIC GLINK, single pack, read only',audio='adsp_apps APM graphs, SID1801, TFA9873 stereo PCM ring; no microphone endpoint',firmware='Local REC image staged to /pong/firmware/adsp.mbn',runtime_observed=False),indent=2)+'\n')
  print(archive)
 if __name__=='__main__':main()

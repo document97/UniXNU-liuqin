@@ -67,7 +67,10 @@ def main():
  provenance_path=a.firmware.parent/'local-inputs.json'
  provenance=json.loads(provenance_path.read_text())
  source=provenance.get('source',{})
- if (source.get('product','').lower()!='pong' or source.get('capture')!='REC read-only active modem'
+ # liuqin: scripts/stage-liuqin-wifi-firmware.py records the stock ROM as the source.
+ liuqin=(source.get('product')=='liuqin' and source.get('capture')=='stock fastboot ROM NON-HLOS.bin'
+         and Path(provenance['firmware_directory']).resolve()==a.firmware.resolve())
+ if not liuqin and (source.get('product','').lower()!='pong' or source.get('capture')!='REC read-only active modem'
      or source.get('slot') not in ('_a','_b')
      or source.get('partition')!='/dev/block/by-name/modem'+source['slot']
      or Path(provenance['firmware_directory']).resolve()!=a.firmware.resolve()):

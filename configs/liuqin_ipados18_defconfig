@@ -3,10 +3,14 @@
 # Off until each has liuqin inputs:
 #   PONG_RAMOOPS_CONSOLE / PONG_VOLATILE_PANIC_LOG: the pong patch writes at the fixed
 #     0x85200000, inside liuqin's stock PIL reservation; liuqin's ramoops is 0xA7000000.
-#   PONG_POWER / PONG_BACKLIGHT: TFA9873 audio, pong battery and DSI DCS brightness;
-#     liuqin has CS35L41 amplifiers and a KTZ8866 I2C backlight that the ABL leaves on.
+#   PONG_BACKLIGHT: DSI DCS brightness; liuqin has a KTZ8866 I2C backlight that the ABL leaves on.
+# On with liuqin inputs:
+#   PONG_POWER: ADSP (PAS1 at liuqin's adsp_region 0x9fd00000/0x3100000) + PMIC GLINK battery,
+#     started by pong_adsp=2. Its TFA9873 audio is refused at runtime (no TFA profiles, pong_audio=0;
+#     liuqin's amplifiers are CS35L41). adsp.mbn comes from the stock release (merge-qcom-mdt.py).
+#   PONG_WIFI: QCA6490 on PCIe0 -- pins, clocks, rails identical to pong; liuqin's PHY table (dts)
+#     and Xiaomi's bd_m81gf.elf calibration (stage-liuqin-wifi-firmware.py).
 #   PONG_ADRENO_PLATFORM: needs liuqin's own signed a730 ZAP firmware; UI renders in software.
-#   PONG_WIFI: needs liuqin's QCA6490 board data.
 CONFIG_XNU_ADRENO_FIRMWARE_PROBE=n
 CONFIG_XNU_ADRENO_PM4_PROBE=n
 CONFIG_XNU_ARMCPU=y
@@ -48,7 +52,7 @@ CONFIG_XNU_OWNER_UNION_SYSTEMOS=n
 CONFIG_XNU_PONG_APFS_DEBUG=y
 CONFIG_XNU_PONG_ADRENO_PLATFORM=n
 CONFIG_XNU_PONG_BACKLIGHT=n
-CONFIG_XNU_PONG_POWER=n
+CONFIG_XNU_PONG_POWER=y
 CONFIG_XNU_PONG_EARLY_TRACE=n
 CONFIG_XNU_PONG_LEGACY_UACCESS=n
 CONFIG_XNU_PONG_RAMOOPS_CONSOLE=n
@@ -62,4 +66,4 @@ CONFIG_XNU_TRUST_CACHE_RUNTIME=n
 CONFIG_XNU_VERIFIED_ROOT_PROBE=n
 CONFIG_XNU_ZONE_PGZ_ALIGNMENT_PROBE=n
 
-CONFIG_XNU_PONG_WIFI=n
+CONFIG_XNU_PONG_WIFI=y

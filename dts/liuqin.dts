@@ -91,7 +91,9 @@
      * (reference/mainline/sm8475-xiaomi-liuqin.dts:1376-1415). No reset line of its own:
      * the panel prepare resets the die, and the touch firmware is downloaded after that.
      * pins: SPI data/clk gpio16-18, cs gpio19, irq gpio21, reset none (0xff).
-     * No XNU driver yet; the node records the inputs for one.
+     * The kernel driver is drivers/LiuqinTouch/liuqin_nvt.c; it reads /arm-io/liuqin-touch,
+     * which make-pong-adt-ipados18.py writes from configs/liuqin-board.json; this node stays
+     * disabled so the format2 generator binds nothing to it.
      */
     liuqin-touch {
         compatible = "liuqin,novatek-nt36532-spi";
@@ -130,12 +132,15 @@
     qcom,phy-power-down-offset = <0x240>;
     max-clock-frequency-hz = <0 0 0 19200000 0 0 0 0 0 0 0 100000000 0 0 0>;
     qcom,phy-sequence = <
+        /* liuqin: the stock Cape FDT (qcom,pcie@1c00000) differs from pong in six entries --
+         * 0x60/0x64 and 0x90/0x94/0x98 (refclk SSC step and per-period) and 0xe3c; these are
+         * liuqin's own values. Everything else in the table is identical. */
         0x240 0x3 0
         0xc0 0x1 0
         0xcc 0x31 0
         0xd0 0x1 0
-        0x60 0xff 0
-        0x64 0x6 0
+        0x60 0xde 0
+        0x64 0x7 0
         0x0 0x4c 0
         0x4 0x6 0
         0xe0 0x90 0
@@ -156,9 +161,9 @@
         0x24 0x34 0
         0x88 0x82 0
         0x28 0x68 0
-        0x90 0xab 0
-        0x94 0xea 0
-        0x98 0x2 0
+        0x90 0x55 0
+        0x94 0x55 0
+        0x98 0x3 0
         0x30 0xab 0
         0x34 0xaa 0
         0x38 0x2 0
@@ -198,7 +203,7 @@
         0xe90 0x3f 0
         0xee4 0x2 0
         0xe40 0x6 0
-        0xe3c 0x18 0
+        0xe3c 0x17 0
         0x2dc 0x5 0
         0x388 0x77 0
         0x398 0xb 0
