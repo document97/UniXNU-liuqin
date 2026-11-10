@@ -1,3 +1,11 @@
+# liuqin (the current device of this checkout)
+
+- Read `../HANDOFF.md` for the current state and the next step, and `../PROJECT.md` for the board, the boot chain and the CI layout. `../backups/REBUILD.md` covers recreating the repositories.
+- This checkout is the **liuqin** port (Xiaomi Pad 6 Pro, SM8475), not pong. Keep PongPlatform24 as the shared SM8475 implementation, and keep liuqin's board data in board.toml, configs/ and dts/.
+- liuqin's bootloader is locked until about 2026-11-13: do not flash or write any partition, and use only `fastboot boot` once it is unlocked. The pong-era authorisation below to enter Android and clear userdata does **not** apply to this device.
+- Follow the Pong rules for probes, porting records and source publishing; ignore the pong machine's `/Volumes/PongDev/...` paths, which do not exist here.
+- Builds run on GitHub Actions only (this machine has no clang/make/WSL). Binary downloads need the system proxy; `gh run download` stalls at 0 bytes.
+
 # Pong probe policy
 
 - Optional probes must record PASS, FAIL, SKIP or RUNNING and return to the normal boot path. Never terminate boot with panic, halt or an unbounded loop to display a probe result.
