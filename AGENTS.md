@@ -4,7 +4,7 @@
 - This checkout is the **liuqin** port (Xiaomi Pad 6 Pro, SM8475), not pong. Keep PongPlatform24 as the shared SM8475 implementation, and keep liuqin's board data in board.toml, configs/ and dts/.
 - liuqin's bootloader is locked until about 2026-11-13: do not flash or write any partition, and use only `fastboot boot` once it is unlocked. The pong-era authorisation below to enter Android and clear userdata does **not** apply to this device.
 - Follow the Pong rules for probes, porting records and source publishing; ignore the pong machine's `/Volumes/PongDev/...` paths, which do not exist here.
-- Builds run on GitHub Actions only (this machine has no clang/make/WSL). Binary downloads need the system proxy; `gh run download` stalls at 0 bytes.
+- Builds run on GitHub Actions only (this machine has no clang/make/WSL). If `gh run download` stalls on an artifact, download it from the run page in a browser instead.
 
 # Pong probe policy
 
