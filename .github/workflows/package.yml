@@ -620,6 +620,16 @@ jobs:
             args+=(--skip-prelink)
           fi
           ./scripts/package.sh "${args[@]}"
+      - name: check the kernel the payload step patches
+        run: |
+          set -euo pipefail
+          # board.toml sets [payload] panic_screen, so the payload step runs
+          # patch-xnu-entry-probe.py --panic-screen on this kernel, and that
+          # script refuses a kernel whose entry point, _start_first_cpu, _panic
+          # or _vinfo do not match its sites. Ask here, where the linked kernel
+          # exists, rather than at the end of the payload and boot steps.
+          python3 device/scripts/check-liuqin-kernel-probe.py \
+            "UniXNU/out/${BOARD}/${OS_PROFILE}/${CONFIG}/kernel/kernel.macho"
       - name: stock Cape SoC DTB
         env:
           GH_TOKEN: ${{ github.token }}
