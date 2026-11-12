@@ -485,6 +485,16 @@ jobs:
           python3 device/scripts/install-unixnu-inputs.py --unixnu UniXNU
           # XNU 11417 has no BCM2837 machine config; the kit recipe builds PONG.
           python3 device/scripts/patch-unixnu-kernel-step.py --unixnu UniXNU
+      - name: check the patch set
+        working-directory: device
+        run: |
+          set -euo pipefail
+          # git apply stops each hunk once the counts in its @@ line are
+          # satisfied, so a hunk that under-counts drops its last line without
+          # any error: run 43179421190 compiled for 11 minutes and only then
+          # reported that pong_ramoops_console_init had no closing brace. This
+          # check costs a second and runs before anything is compiled.
+          python3 scripts/check-xnu-patches.py
       - name: build inputs
         run: |
           set -euo pipefail
