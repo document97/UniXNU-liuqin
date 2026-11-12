@@ -15,6 +15,7 @@ name: package
 #     fw/wlan/ (QCA6490) are embedded in the kernel, fw/adsp/ is merged into adsp.mbn
 #     and staged into the OS volume by the userdata job.
 # The pong text below still describes the shared parts.
+# (Re-touched 2026-11-12 so GitHub registers this workflow in the recreated repository.)
 
 # docs/porting/packaging.md, plus the artifact that document leaves out: the
 # userdata image.
