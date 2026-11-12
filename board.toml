@@ -108,10 +108,17 @@ LIUQIN_INITRD_DISK_ENABLED = "1" # Set 0 to isolate SEC/HOB without the disk DXE
 # The boot menu entry the firmware's DarwinBoot lists first, and the volume label of payload.img.
 title = "liuqin iPadOS 18.7.10"
 volume = "UNIXNU"
-# Draw the kernel panic text on the framebuffer: without a serial console this is the only
-# way to tell a panic from a hang on the tablet, and it is the input the pstore console
-# (CONFIG_XNU_PONG_RAMOOPS_CONSOLE) cannot give while the device is still running.
-panic_screen = true
+# Draw the kernel panic text on the framebuffer. Off, because the payload step
+# can only install that screen with scripts/patch-xnu-entry-probe.py, and the
+# script links into the padding after _start that it insists is zero fill: this
+# kernel's padding is NOP fill, so run 43184148347 stopped with "Padding at
+# 0xfffffff007fe2518 is not empty" after the kernel had already linked. A panic
+# is not lost without it: the console path records into ramoops before it checks
+# disableConsoleOutput, so the text reaches console-ramoops-0 and survives the
+# reboot into Android. scripts/check-liuqin-kernel-probe.py checks the probe
+# sites a panic screen would need, so turning this back on fails early and says
+# why until the padding rule is relaxed.
+panic_screen = false
 # 96 MiB, the --fat-mib a local run packs: PongBootMemoryDxe refuses an initrd
 # above PONG_FAT_MAX_INITRD (128 MiB), and the 4096-byte PONGFAT1 header is
 # inside the payload image the package step repacks, so the volume stays well

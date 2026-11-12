@@ -4,19 +4,25 @@
 The payload step runs `patch-xnu-entry-probe.py --panic-screen` when board.toml
 sets [payload] panic_screen. That script rebases its sites from the Mach-O entry
 point, resolves _start_first_cpu, _panic and _vinfo from the symbol table, and
-then requires three original instructions at fixed offsets from the entry; it
-refuses a kernel that does not match. Today that refusal arrives after the
-payload and the boot image have been built, so this runs the same checks on the
-kernel the build just linked and names the reason first.
+then requires three original instructions at fixed offsets from the entry. It
+also requires the cave it links into to be zero fill: run 43184148347 failed
+after the kernel had linked with "Padding at 0xfffffff007fe2518 is not empty",
+because this kernel's cave is NOP fill (0xd5031f20 words), which an earlier
+version of this check wrongly accepted.
+
+With --board the check is skipped when [payload] panic_screen is not true, since
+the payload step then never calls the probe script.
 
 Usage:
-    python3 scripts/check-liuqin-kernel-probe.py <kernel.macho>
+    python3 scripts/check-liuqin-kernel-probe.py <kernel.macho> [--board board.toml]
 """
 import struct
 import sys
+import tomllib
+from pathlib import Path
 
 ENTRY_VA = 0xFFFFFFF00B9D0488      # the reference LC_UNIXTHREAD pc of the probe script
-CAVE_FIRST = 0xFFFFFFF00B9D0500    # its stage-1 cave; the eight-byte stride below is the next one
+CAVE_FIRST = 0xFFFFFFF00B9D0500    # its stage-1 cave; CAVE_SIZE below covers one stage
 CAVE_SIZE = 0x60
 NOP = 0xD503201F
 
@@ -43,8 +49,24 @@ def load(path):
     return data, segments, entry, symtab
 
 
-def main(path):
-    data, segments, entry, symtab = load(path)
+def panic_screen_requested(board):
+    if board is None:
+        return True
+    return bool(tomllib.loads(Path(board).read_text()).get('payload', {}).get('panic_screen', False))
+
+
+def main(argv):
+    if len(argv) < 2:
+        raise SystemExit(__doc__)
+    kernel = argv[1]
+    board = None
+    if '--board' in argv:
+        board = argv[argv.index('--board') + 1]
+    if not panic_screen_requested(board):
+        print('%s: [payload] panic_screen is not true, the payload step will not call '
+              'patch-xnu-entry-probe.py; nothing to check' % (board or 'board.toml'))
+        return 0
+    data, segments, entry, symtab = load(kernel)
 
     def offset(va):
         for vmaddr, vmsize, fileoff, filesize in segments:
@@ -96,16 +118,17 @@ def main(path):
     else:
         print('  SCTLR/ISB/CPACR sequence at %#x' % sequence)
 
-    # --panic-screen links code into the cave after the entry; with --no-reset it
-    # uses stage 1 only. The same region is NOP padding in a source kernel.
+    # --panic-screen links its code into the cave after the entry, which the
+    # probe script requires to be zero fill; a NOP sled is not accepted.
     cave = CAVE_FIRST + (entry - ENTRY_VA)
     body = data[offset(cave):offset(cave) + CAVE_SIZE]
-    if len(body) != CAVE_SIZE or any(struct.unpack('<%dI' % (CAVE_SIZE // 4), body)[word_index] not in (0, NOP)
-                                     for word_index in range(CAVE_SIZE // 4)):
-        problems.append('the %d-byte probe cave at %#x is not empty (NOP or zero) in this kernel'
-                        % (CAVE_SIZE, cave))
+    words = struct.unpack('<%dI' % (CAVE_SIZE // 4), body)
+    if any(words):
+        filler = 'NOP fill' if all(w in (0, NOP) for w in words) else 'kernel code'
+        problems.append('the %d-byte cave at %#x is %s, so patch-xnu-entry-probe.py stops with '
+                        '"Padding at %#x is not empty"' % (CAVE_SIZE, cave, filler, cave))
     else:
-        print('  probe cave at %#x is empty' % cave)
+        print('  cave at %#x is zero fill' % cave)
 
     for problem in problems:
         print('  ' + problem)
@@ -113,4 +136,4 @@ def main(path):
 
 
 if __name__ == '__main__':
-    sys.exit(main(sys.argv[1]))
+    sys.exit(main(sys.argv))
