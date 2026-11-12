@@ -1,8 +1,12 @@
 # UniXNU Xiaomi Pad 6 Pro (liuqin) iPadOS 18 / Darwin 24, first-boot configuration.
 # Derived from pong_ipados18_defconfig: same SM8475 CPU, timer, UFS and APFS root path.
 # Off until each has liuqin inputs:
-#   PONG_RAMOOPS_CONSOLE / PONG_VOLATILE_PANIC_LOG: the pong patch writes at the fixed
-#     0x85200000, inside liuqin's stock PIL reservation; liuqin's ramoops is 0xA7000000.
+#   PONG_RAMOOPS_CONSOLE: on since 2026-11-12. The patch now writes at liuqin's own
+#     ramoops (0xA7000000, 4 MiB region, console 2 MiB, pmsg 2 MiB, read from the stock
+#     dtbo.img), which is the region Android's pstore reads; the old pong address
+#     0x85200000 sits inside liuqin's stock PIL reservation.
+#   PONG_VOLATILE_PANIC_LOG: still off. It is a static 128 KiB buffer for the panic
+#     screen, not a persistent record, and nothing needs it yet.
 # On with liuqin inputs:
 #   PONG_POWER: ADSP (PAS1 at liuqin's adsp_region 0x9fd00000/0x3100000) + PMIC GLINK battery,
 #     started by pong_adsp=2. Its TFA9873 audio is refused at runtime (no TFA profiles, pong_audio=0;
@@ -56,7 +60,7 @@ CONFIG_XNU_PONG_BACKLIGHT=y
 CONFIG_XNU_PONG_POWER=y
 CONFIG_XNU_PONG_EARLY_TRACE=n
 CONFIG_XNU_PONG_LEGACY_UACCESS=n
-CONFIG_XNU_PONG_RAMOOPS_CONSOLE=n
+CONFIG_XNU_PONG_RAMOOPS_CONSOLE=y
 CONFIG_XNU_PONG_VOLATILE_PANIC_LOG=n
 CONFIG_XNU_SHENG_PMGR=n
 CONFIG_XNU_SMMU4K_PROBE=n

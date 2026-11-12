@@ -108,6 +108,10 @@ LIUQIN_INITRD_DISK_ENABLED = "1" # Set 0 to isolate SEC/HOB without the disk DXE
 # The boot menu entry the firmware's DarwinBoot lists first, and the volume label of payload.img.
 title = "liuqin iPadOS 18.7.10"
 volume = "UNIXNU"
+# Draw the kernel panic text on the framebuffer: without a serial console this is the only
+# way to tell a panic from a hang on the tablet, and it is the input the pstore console
+# (CONFIG_XNU_PONG_RAMOOPS_CONSOLE) cannot give while the device is still running.
+panic_screen = true
 # 96 MiB, the --fat-mib a local run packs: PongBootMemoryDxe refuses an initrd
 # above PONG_FAT_MAX_INITRD (128 MiB), and the 4096-byte PONGFAT1 header is
 # inside the payload image the package step repacks, so the volume stays well
