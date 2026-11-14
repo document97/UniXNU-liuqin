@@ -253,7 +253,63 @@ adb 是**独立的 USB function**，由 `persist.sys.usb.config=adb` 固定，�
 写明 XNU 原生 DWC3/CDC 日志驱动尚未实现。下一步要单独用 `usbconsole-v2.img` 验证
 `pong_usb=1` 是否真能拉起 CDC interface；注意那个镜像没有 PSCI reset，可能卡住需要一次长按电源。
 
-## 6. 其它同时被推翻的判断
+## 6. 阶段锚点与两种镜像（2026-11-14 上午，真机）
+
+### 6.1 计时探针
+
+利用 Mach-O 符号表（`kernel.macho` 有 83,766 个符号，
+`__TEXT_EXEC vm=0xfffffff007dd4000 / file=0xdd0000`，
+`file = VA - 0xfffffff007004000`）把任意函数入口那一条指令换成 `b`
+跳回入口后的 727 个 NOP cave，cave 里跑「纯延时 + PSCI SYSTEM_RESET」。
+看**复位时刻**就能判断执行到哪个锚点，不依赖 root / pstore / CDC / 拍照。
+
+`--hook-offset` 接 Mach-O 文件偏移；`patch_hook()` 校验 cave 全是 NOP、
+分支在 ±128 MB 内，并在最后统一重算 CRC。
+
+| 镜像 | 锚点 | 延时 | BOOT_SENT → adb 回来 | 结论 |
+|---|---|---|---|---|
+| `probe-blue-v2.img` | 内核入口 | 5 s | +34 s | 入口执行 |
+| `probe-blue-12s.img` | 内核入口 | 12 s | +42 s | 延时每 +7 s，复位后移 +8 s |
+| `probe-mmu-v1.img` | `0xFE0358` `msr sctlr_el1,x0` | 20 s | +50 s | **走到 MMU 开启前** |
+| `probe-machine-startup.img` | `_machine_startup` `0xFE22EC` | 25 s | +59 s | **穿过 MMU 开启** |
+| `probe-load-init.img` | `_load_init_program` `0x12FE72C` | 45 s | 150 s 内无复位 | **没走到 exec launchd 前** |
+
+结论：`ABL → UEFI → DarwinBoot → ExitBootServices → br x1 → 内核入口 →
+_start_first_cpu → MMU 开启 → machine_startup` 全通。payload 加载、跳转地址、
+cache 清洗、ADT 窗口、MMU 开启全部排除。卡点在 `machine_startup` 与
+`_load_init_program` 之间（`arm_vm_init` / `kernel_bootstrap` / `bsd_init` /
+mountroot / APFS）。**注意 `/data` 上的 19.39 GiB root 卷此时已被 recovery
+「清除数据」抹掉，root 挂载失败是最可能的原因**，所以先把系统写回去再判。
+
+符号表锚点：`_start_first_cpu 0xFE005C`、`_arm_init 0x1687AAC`、
+`_kernel_bootstrap 0xE60BE8`、`_bsd_init 0x12C9B08`、
+`_load_init_program 0x12FE72C`、`_panic 0x165A108`、`_mountroot 0x179B100`
+（`_mountroot` 首字为 0，是数据/未落盘符号，不适合当 hook 点）。
+
+### 6.2 两种镜像别混淆（用户视角）
+
+- `userdata.sparse.img`（19.39 GiB）= **iPadOS 系统本体**，OS / SystemOS /
+  Data 三个卷，`fastboot flash userdata` 写进分区。这才是「刷系统」。
+- `*.img`（约 100 MB）= **引导盘 / RAM 启动镜像**，`fastboot boot` 只在内存
+  运行、不写分区，内含 XNU 内核 + ADT + 启动参数。换引导盘不会补回系统。
+  11-14 上午在 recovery 里点「清除数据」把 `/data` 重新格式化成 f2fs，
+  19.39 GiB 系统卷就没了，此后所有引导盘都因 root 挂载失败而黑屏。
+
+`pong_skip_setup` 的真实语义见 `userland/ui_compat18.c:2090`：
+`skip_setup=boot_option("pong_skip_setup=1")`。为 1 时
+`springboard_setup_policy()` 会替换 `SBLockdownManager._setupActivationState`
+和 `SBSetupManager._setSetupRequiredReason:`，**强制跳过 Setup Assistant 欢迎界面**
+直接进桌面（因为移植机没有 SEP / 激活服务）。想看「苹果欢迎界面」要把它设成 0，
+`welcome-setup.img` 就是只改这两处（CRC `2e4ee686`）。
+
+### 6.3 写系统之后 adb 会失效
+
+`fastboot flash userdata` 覆盖 `/data`，`/data/misc/adb/adb_keys` 随之消失，
+`adb reboot bootloader` 不再可用。后续循环用
+`builds/pkg-43581151943/run-fastboot-probe.ps1`（纯 fastboot，靠 USB 枚举变化
+判断复位）。设备会因 `/data` 不是合法 f2fs 而再次进 MIUI Recovery 循环。
+
+## 7. 其它同时被推翻的判断
 
 - `pong_usb=1` 「USB 控制台不支持」：当时镜像 CRC 是坏的，结论无效，需重测。
 - 「内核入口没执行」：同上。
