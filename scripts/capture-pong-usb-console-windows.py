@@ -102,11 +102,16 @@ def main() -> int:
     ap.add_argument("--wait", type=float, default=0,
                     help="poll up to N seconds for the CDC port to appear")
     ap.add_argument("--list", action="store_true", help="list all COM ports and exit")
-    ap.add_argument("--list-usb", action="store_true", help="dump USB PnP devices and exit")
+    ap.add_argument("--list-usb", action="store_true",
+                    help="dump live USB PnP devices (alone = list mode; with --output = also after capture)")
     ap.add_argument("--preview", type=int, default=0, help="print first N captured bytes as text")
     a = ap.parse_args()
 
-    if a.list or a.list_usb:
+    # --list-usb on its own is a diagnostic, not a capture request.
+    if a.list_usb and not a.output and not a.list:
+        a.list = True
+
+    if a.list:
         print("COM ports:")
         ports = list(list_ports.comports())
         marked = {p.device for p in candidates()}
@@ -143,6 +148,9 @@ def main() -> int:
             print("no Pong CDC COM port appeared.", file=sys.stderr)
             print("Hint: run again with --list-usb to see whether the gadget "
                   "enumerated without a CDC driver.", file=sys.stderr)
+            if a.list_usb:
+                print()
+                list_usb()
             return 2
         time.sleep(0.5)
 
@@ -173,6 +181,9 @@ def main() -> int:
     if a.preview and data:
         sample = bytes(data[:a.preview])
         print(repr(sample.decode("utf-8", "replace")))
+    if a.list_usb:
+        print()
+        list_usb()
     return 0
 
 

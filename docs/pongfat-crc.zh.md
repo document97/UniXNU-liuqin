@@ -175,6 +175,84 @@ mrs x1, cntpct_el0 = 0xD53BE021
 5. 启动链确认后再 `fastboot flash userdata userdata.sparse.img` 写回 19.39 GiB 镜像
    —— recovery 里「清除数据」已经把 `/data` 格式化掉了，之前写的 SHNGROOT 不在了。
 
+## 5.1 两轮实测（2026-11-14 09:00–09:08，CRC 正确版本）
+
+`run-probe.ps1` 全自动完成：等 adb → `adb reboot bootloader` → `fastboot boot` → 监控，**全程无需按键组合**。
+
+| 镜像 | probe 延时 | BOOT_SENT | adb 回到 `device` | 从 BOOT_SENT 起 |
+|---|---|---|---|---|
+| `probe-blue-v2.img` | 5 s | 09:01:03 | 09:01:37 | 34 s |
+| `probe-blue-12s.img` | 12 s | 09:06:59 | 09:07:41 | 42 s |
+
+两轮都在 `+5s` 看到 `fastboot=[???????????? fastboot]`（复位瞬间 bootloader 的临时枚举），
+`+8s` USB 全断，随后 Android 冷启动完成、adb 以 `device`（不是 `unauthorized`）自动回来。
+**延时从 5 s 调到 12 s，重启时刻后移 8 s（预期 7 s，差 1 s 是开机时间波动）** ——
+复位确实由写进内核入口 cave 的 PSCI 代码触发，不是 watchdog，也不是偶发重启。
+两个镜像只差延时段：`patch-boot-image.py --delay-seconds` 用 `cntfrq_el0` 算 tick，
+已用 keystone 逐条核对（`mrs x4,cntfrq_el0 = d53be004`、`movz x5,#12 = d2800185`）。
+
+**结论：`ABL → BootShim+UEFI FD → DarwinBoot → ExitBootServices → DarwinEnter(br x1) → 内核入口`
+整条交接链是通的。** 卡点在内核入口**之后**（MMU 开启 / ADT 解析 / 内存映射 / 早期初始化），
+不再是 payload 加载、跳转地址或 cache 清洗。上面 §5 的「只有绿条」分支已被实测排除。
+
+### 计时探针：不依赖任何日志通道的定位方法
+
+设备当前没有 root、`/sys/fs/pstore` 不可读、XNU CDC 控制台未实现、framebuffer 文字要人拍照。
+但**「在代码某处放一个不同延时的 PSCI reset，看重启时刻」**是全自动且可量化的：
+每次只在一个锚点放探针，若该锚点被执行就会在对应时刻复位并自动回 Android，
+设备永远不会卡死、永远不需要长按电源。改的字节由 `patch-boot-image.py` 统一重算 CRC。
+
+**已备好 stage-2 镜像 `probe-mmu-v1.img`**（CRC `abaa967c`，sha256 `b0a2d8b3…`），下一轮直接跑：
+
+- 全内核只有两处 `msr sctlr_el1, x0`（`d5181000`）：Mach-O `0xFDE424`（入口之前）与
+  `0xFE0358`（入口之后）。后者即 `_start_first_cpu+0x2fc` 的 MMU 使能点，
+  boot image 偏移 `0x234000 + 0xFE0358 = 0x1214358`。
+- 入口后有 **727 个连续 NOP / 2908 B**（Mach-O `0xFDE4A4..0xFDF000`、
+  image `0x12124A4..0x1213000`），cave 取 `image+0x12124E0`。
+- `patch-boot-image.py --hook-offset 0xFE0358 --delay-seconds 20` 把 MMU 点那条指令换成
+  `b 0x17fff862`（delta `-7800 B / -1950` 条指令，在 ±128 MB 内），跳进 cave 跑
+  **纯延时 + PSCI reset**（不画带：到这一步 `x0` 已不是 boot_args，别再依赖 framebuffer）。
+- 静态复核：入口仍是 `140006ef`（内核正常执行到 hook）、hook 处 `d5181000 → 17fff862`、
+  cave 首字 `d53be001` = `mrs x1,cntfrq_el0`、`d2800282` = `movz x2,#20`、末尾 `d4000003` = `smc #0`，
+  全镜像只改了 18 个 word，CRC 正确。
+
+判读：**约 20 s 后自动复位** = 内核跑到了 MMU 开启前；**不复位 / 黑屏** = 卡在
+`_start_first_cpu` 更早的位置（此时需要长按电源约 10 s 回 Android，再换更靠前的锚点）。
+后续可把 hook 逐步前移/后移，用不同延时当「阶段指纹」二分定位，全程只靠重启时刻，
+不需要 root、pstore、CDC 或屏幕拍照。
+
+## 5.2 「重启后默认仅充电」不影响 adb
+
+用户观察到重启后 USB 模式回到「仅充电」。实测属性：
+
+```
+sys.usb.config           adb
+persist.sys.usb.config   adb      ← 持久属性，重启不丢
+init.svc.adbd            running
+adb_enabled              1
+usb_charging             true     ← 「仅充电」只关掉 MTP
+```
+
+adb 是**独立的 USB function**，由 `persist.sys.usb.config=adb` 固定，与 MTP 是否开启无关。
+两轮 PSCI 复位后 adb 都自动以 `device` 回来，没动过 USB 模式。**保持「仅充电」即可**，
+切成「传输文件」反而变成 `mtp,adb`、多一个接口、增加枚举波动。
+
+真正会断 adb 的三种情况（都不是 USB 模式问题）：
+1. 清数据 / 恢复出厂 → `/data/misc/adb/adb_keys` 被删 → `unauthorized`，需在平板上点「允许 USB 调试」；
+2. 开发者选项被重置 → `adb_enabled=0`；
+3. 设备压根没进 Android（黑屏 / UEFI / DarwinBoot）→ 与 USB 模式无关。
+
+`run-probe.ps1` 已加自动识别：等待时区分 `unauthorized` / 「USB 在但无 adb」/ 全断，
+并在 Android 就绪时打印 `persist.sys.usb.config` 与 `adb_enabled` 做防呆。
+
+### USB CDC 抓取的实测边界
+
+11-14 09:06 那轮同时守候了 `capture-pong-usb-console-windows.py --wait 130`：
+**没有任何 Pong CDC COM 口出现**，`--list-usb` 只看到 `VID_18D1&PID_4EE7`。
+这符合预期 —— 该轮镜像是 `pong_usb=0`（`probe-blue-12s`），且 `docs/USB-LOGGING-PLAN.zh.md`
+写明 XNU 原生 DWC3/CDC 日志驱动尚未实现。下一步要单独用 `usbconsole-v2.img` 验证
+`pong_usb=1` 是否真能拉起 CDC interface；注意那个镜像没有 PSCI reset，可能卡住需要一次长按电源。
+
 ## 6. 其它同时被推翻的判断
 
 - `pong_usb=1` 「USB 控制台不支持」：当时镜像 CRC 是坏的，结论无效，需重测。
