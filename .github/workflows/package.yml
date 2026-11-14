@@ -74,6 +74,10 @@ on:
         description: "Optional sha256 of that IPSW; a mismatch stops the run."
         type: string
         default: ""
+      reuse_userdata_run:
+        description: "Run id whose liuqin-userdata / volume-layout artifacts to build from; empty builds them again."
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -103,6 +107,9 @@ env:
 jobs:
   userdata:
     name: userdata image
+    # Rebuilding it costs ~28 minutes and 19 GB of runner disk; when a run is only
+    # being redone for the boot side, the artifacts of the earlier one are reused.
+    if: inputs.reuse_userdata_run == ''
     runs-on: macos-15-intel
     timeout-minutes: 300
     outputs:
@@ -390,6 +397,10 @@ jobs:
         with:
           name: volume-layout
           path: device
+          # Defaults to this run; a reused run supplies the layout the userdata
+          # image was built against, which the boot side has to agree with.
+          run-id: ${{ inputs.reuse_userdata_run || github.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: reclaim disk
         run: |
           set -euo pipefail
