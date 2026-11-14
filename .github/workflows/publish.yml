@@ -1,0 +1,80 @@
+name: publish package
+
+# Turns the artifacts of a package run into release assets.
+#
+# An artifact is not a link one can hand to a download manager: downloading one
+# means asking the API with a token, and the answer is a signed URL that expires
+# within minutes, so a segmented download dies partway. Release assets are stable
+# URLs that survive resumption and are capped at 2 GiB per file, so each encrypted
+# part is split before it is uploaded.
+#
+# The bytes move runner to GitHub without passing through anyone's home
+# connection: the workflow downloads the artifacts with, and uploads them to, the
+# same GitHub.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: the package run whose artifacts to publish
+        required: true
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: download the artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ inputs.run_id }}" -R "${{ github.repository }}" -D in
+          find in -type f -printf '%12s %p\n' | sort -rn
+
+      - name: split into under-2-GiB pieces
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          find in -type f | while read -r f; do
+            name="$(basename "$f")"
+            size="$(stat -c %s "$f")"
+            if [ "$size" -gt $((1900*1024*1024)) ]; then
+              split -b 1900M -d -a 3 "$f" "out/${name}."
+              echo "split ${name} (${size} B) into $(ls "out/${name}."* | wc -l) pieces"
+            else
+              cp "$f" "out/${name}"
+            fi
+          done
+          # The release would refuse anything larger, so fail here instead.
+          if find out -type f -size +2047M | grep -q .; then
+            echo 'an asset still exceeds the 2 GiB release limit'
+            exit 1
+          fi
+          ( cd out && sha256sum -- * > SHA256SUMS.txt )
+          ls -la out
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="pkg-${{ inputs.run_id }}"
+          notes="Artifacts of package run ${{ inputs.run_id }}, republished as release assets so the
+          parts can be fetched by a download manager. Each .7z is AES-256 encrypted with an
+          encrypted header; the password is the LIUQIN_ARTIFACT_PASSWORD repository secret.
+          Pieces suffixed .000, .001, ... are one file split at 1900 MiB: concatenate them in
+          order before extracting. SHA256SUMS.txt covers the pieces as published."
+          if gh release view "$tag" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$tag" out/* -R "${{ github.repository }}" --clobber
+          else
+            gh release create "$tag" out/* -R "${{ github.repository }}" \
+              --title "liuqin package ${{ inputs.run_id }}" --notes "$notes"
+          fi
+          gh release view "$tag" -R "${{ github.repository }}" --json assets \
+            --jq '.assets[] | "\(.size)\t\(.name)"'
