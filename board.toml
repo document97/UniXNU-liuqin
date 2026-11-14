@@ -192,11 +192,24 @@ chip_id = "0x8010"
 
 [userdata]
 # The userdata partition this board installs into, in 4 KiB sectors: the geometry
-# scripts/install-pong-ufs-data.py and scripts/prepare-ipados18-ufs-layout.py check
-# against, and the same pair those scripts read from the device's own GPT.
-first_lba = 0x413248
-last_lba = 0x75A40EA
+# scripts/install-pong-ufs-data.py and scripts/prepare-ipados18-ufs-layout.py read
+# from this table. Measured on this tablet on 2026-11-14, not carried over from pong:
+#   * images/gpt_both0.bin of liuqin_images_V14.0.9.0.TMYCNXM_13.0 is the LUN 0 table
+#     (switch .. rescue, then userdata as entry 34). LUN 0 is the disk Android calls
+#     sda, so userdata is sda35, the node /dev/block/by-name already reported.
+#   * That table names userdata as first_lba with last_lba = first_lba - 1, the
+#     grow-to-end marker, so the end comes from the size fastboot reports for the
+#     partition: 0x1A72DFB000 B = 0x1A72DFB 4 KiB sectors = 105.795 GiB.
+#   * The same table agrees with fastboot's partition-size for all 34 partitions above
+#     userdata, byte for byte, and entries 13 and 24 of gpt_both4.bin are boot_a and
+#     vendor_boot_a, the sde14 and sde25 the 2026-11-12 adb session recorded.
+# first_lba = 0x2A1600 (1 MiB aligned); last_lba = 0x2A1600 + 0x1A72DFB - 1.
+first_lba = 0x2A1600
+last_lba = 0x1D143FA
 lba_bytes = 4096
+# The node the install scripts expect userdata to resolve to: this tablet numbers it
+# 35 (LUN 0 has 35 partitions), where pong numbers it 13.
+device = "/dev/block/sda35"
 # The windows of the userdata image are the OS and SystemOS disk images of the IPSW, in
 # that order; the OS profile lists them ([userdata] windows of
 # os-profiles/ipados-18.7.10-22H374/profile.toml), because they are the profile's

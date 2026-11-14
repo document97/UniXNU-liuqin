@@ -12,9 +12,17 @@ from pathlib import Path
 import shlex
 import struct
 import subprocess
+import tomllib
 
+# Pong's window and node are the fallback; board.toml [userdata] is this device's.
 FIRST_4K=0x413248
 LAST_4K=0x75a40ea
+DEVICE_4K='/dev/block/sda13'
+if (Path(__file__).resolve().parents[1]/'board.toml').is_file():
+    _userdata=tomllib.loads((Path(__file__).resolve().parents[1]/'board.toml').read_text()).get('userdata',{})
+    FIRST_4K=int(str(_userdata.get('first_lba',FIRST_4K)),0)
+    LAST_4K=int(str(_userdata.get('last_lba',LAST_4K)),0)
+    DEVICE_4K=_userdata.get('device',DEVICE_4K)
 PARTITION_BYTES=(LAST_4K-FIRST_4K+1)*4096
 TARGET='/dev/block/by-name/userdata'
 
@@ -56,15 +64,16 @@ def main():
     if state!='recovery':
         raise SystemExit('Recovery mode is required')
     target=shell('readlink -f '+TARGET)
+    name=DEVICE_4K.rsplit('/',1)[-1]
     geometry=dict(device=target,bytes=int(shell('blockdev --getsize64 '+TARGET)),
-        start_512=int(shell('cat /sys/class/block/sda13/start')),
-        sectors_512=int(shell('cat /sys/class/block/sda13/size')),
+        start_512=int(shell('cat /sys/class/block/%s/start'%name)),
+        sectors_512=int(shell('cat /sys/class/block/%s/size'%name)),
         logical_block_bytes=int(shell('cat /sys/class/block/sda/queue/logical_block_size')))
-    if (target!='/dev/block/sda13' or geometry['bytes']!=PARTITION_BYTES or
+    if (target!=DEVICE_4K or geometry['bytes']!=PARTITION_BYTES or
         geometry['start_512']!=FIRST_4K*8 or geometry['sectors_512']*512!=PARTITION_BYTES or
         geometry['logical_block_bytes']!=4096):
-        raise SystemExit('Pong userdata geometry differs; refusing writes')
-    if shell('ls /sys/class/block/sda13/holders'):
+        raise SystemExit('userdata geometry differs from board.toml [userdata]; refusing writes')
+    if shell('ls /sys/class/block/%s/holders'%name):
         raise SystemExit('userdata has active device-mapper holders')
     mounts=shell('cat /proc/mounts').splitlines()
     if any(line.split()[0] in (target,TARGET) for line in mounts):

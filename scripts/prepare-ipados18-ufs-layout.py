@@ -4,12 +4,16 @@
 Each window's SHA-256 is stored in the directory entry. The images themselves
 stay where they are; this writer does not copy them into a new disk image.
 """
-import argparse,hashlib,json,struct,sys
+import argparse,hashlib,json,struct,sys,tomllib
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1];MIB=1<<20
 sys.path.insert(0,str(ROOT/'scripts'))
 import pong_paths
+# Pong's window is the fallback; board.toml [userdata] is the one this device uses.
 FIRST=0x413248;LAST=0x75a40ea
+if (ROOT/'board.toml').is_file():
+    _userdata=tomllib.loads((ROOT/'board.toml').read_text()).get('userdata',{})
+    FIRST=int(str(_userdata.get('first_lba',FIRST)),0);LAST=int(str(_userdata.get('last_lba',LAST)),0)
 
 def digest_file(path):
     digest=hashlib.sha256()
