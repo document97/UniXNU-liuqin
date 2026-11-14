@@ -160,6 +160,17 @@ jobs:
           # not a skip: a userland prepared without it boots nothing.
           sudo -n true || { echo 'this runner cannot sudo -n, and the userland chain needs it'; ok=0; }
           [ "$ok" = 1 ]
+      - name: python dependencies
+        # scripts/decrypt-ipados18-aea.py unwraps the profile-1 archive key with pyhpke,
+        # and the runner image does not ship it. A job without ipsw_url never decrypts,
+        # which is how this went unnoticed until the first run that passed one; a job
+        # with ipsw_url cannot get past the OS decrypt without it.
+        run: |
+          set -euo pipefail
+          python3 --version
+          python3 -m pip install --user --disable-pip-version-check pyhpke \
+            || python3 -m pip install --break-system-packages --disable-pip-version-check pyhpke
+          python3 -c 'from pyhpke import AEADId, CipherSuite, KDFId, KEMId, KEMKey; print("pyhpke import ok")'
       - name: ADSP firmware from the stock release
         env:
           GH_TOKEN: ${{ github.token }}
