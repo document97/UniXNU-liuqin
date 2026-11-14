@@ -2,15 +2,19 @@ name: publish package
 
 # Turns the artifacts of a package run into release assets.
 #
+# Two problems this solves, both about getting 19 GB to a person on a slow link:
+#
 # An artifact is not a link one can hand to a download manager: downloading one
 # means asking the API with a token, and the answer is a signed URL that expires
 # within minutes, so a segmented download dies partway. Release assets are stable
-# URLs that survive resumption and are capped at 2 GiB per file, so each encrypted
-# part is split before it is uploaded.
+# URLs that survive resumption and are capped at 2 GiB per file, so every piece is
+# split before it is uploaded.
 #
-# The bytes move runner to GitHub without passing through anyone's home
-# connection: the workflow downloads the artifacts with, and uploads them to, the
-# same GitHub.
+# The package workflow stores its parts with -mx=0, so 19 GB of image arrives as
+# 19 GB of archive: the Data volume alone is a fresh 8 GiB APFS container that is
+# almost entirely zero. Recompressing here costs runner time instead of the
+# reader's bandwidth. Compression and AES-256 with an encrypted header happen in
+# the same pass, so the parts stay as unreadable without the password as before.
 
 on:
   workflow_dispatch:
@@ -29,6 +33,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: reclaim disk
+        run: |
+          set -euo pipefail
+          df -h /
+          # Peak is the 19 GiB of artifacts plus one recompressed part. The
+          # stock image is mostly tool caches this job never touches.
+          need=$((26 * 1024 * 1024))
+          avail="$(df -k / | awk 'NR==2 {print $4}')"
+          echo "avail_kb=${avail} need_kb=${need}"
+          if [ "$avail" -lt "$need" ]; then
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                        /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+            sudo apt-get clean
+          fi
+          df -h /
+
+      - name: seven zip
+        run: |
+          set -euo pipefail
+          command -v 7z >/dev/null || { sudo apt-get update -qq; sudo apt-get install -y -qq p7zip-full; }
+          7z i | head -3
+
       - name: download the artifacts
         env:
           GH_TOKEN: ${{ github.token }}
@@ -36,44 +62,71 @@ jobs:
           set -euo pipefail
           gh run download "${{ inputs.run_id }}" -R "${{ github.repository }}" -D in
           find in -type f -printf '%12s %p\n' | sort -rn
+          df -h /
+
+      - name: recompress the parts, one at a time
+        env:
+          ARTIFACT_PASSWORD: ${{ secrets.LIUQIN_ARTIFACT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # Each pass holds one source part and its replacement, so the source is
+          # deleted as soon as the replacement tests good.
+          shopt -s nullglob
+          for f in in/*
+          do
+            printf '\n=== %s (%s B) ===\n' "$f" "$(stat -c %s "$f")"
+            case "$f" in
+              *.7z)
+                base="$(basename "$f" .7z)"
+                dest="out/${base}.7z"
+                7z x -p"${ARTIFACT_PASSWORD}" -so "$f" \
+                  | 7z a -t7z -mx=5 -mmt=on -mhe=on -p"${ARTIFACT_PASSWORD}" \
+                        -si"${base}" "$dest" > /dev/null
+                7z t -p"${ARTIFACT_PASSWORD}" "$dest" > /dev/null
+                echo "recompressed ${base}: $(stat -c %s "$dest") B"
+                rm -f "$f"
+                ;;
+              *)
+                cp "$f" "out/$(basename "$f")"
+                ;;
+            esac
+            df -h / | tail -1
+          done
 
       - name: split into under-2-GiB pieces
         run: |
           set -euo pipefail
-          mkdir -p out
-          find in -type f | while read -r f; do
-            name="$(basename "$f")"
-            size="$(stat -c %s "$f")"
-            if [ "$size" -gt $((1900*1024*1024)) ]; then
-              split -b 1900M -d -a 3 "$f" "out/${name}."
-              echo "split ${name} (${size} B) into $(ls "out/${name}."* | wc -l) pieces"
-            else
-              cp "$f" "out/${name}"
+          cd out
+          for f in *; do
+            [ -f "$f" ] || continue
+            if [ "$(stat -c %s "$f")" -gt $((1900*1024*1024)) ]; then
+              split -b 1900M -d -a 3 "$f" "${f}."
+              echo "split ${f} into $(ls "${f}".* | wc -l) pieces"
+              rm -f "$f"
             fi
           done
           # The release would refuse anything larger, so fail here instead.
-          if find out -type f -size +2047M | grep -q .; then
+          if find . -type f -size +2047M | grep -q .; then
             echo 'an asset still exceeds the 2 GiB release limit'
             exit 1
           fi
-          ( cd out && sha256sum -- * > SHA256SUMS.txt )
-          ls -la out
+          ls -la
+          du -ch -- * 2>/dev/null | tail -1
 
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          cd out
+          sha256sum -- * > SHA256SUMS.txt
           tag="pkg-${{ inputs.run_id }}"
-          notes="Artifacts of package run ${{ inputs.run_id }}, republished as release assets so the
-          parts can be fetched by a download manager. Each .7z is AES-256 encrypted with an
-          encrypted header; the password is the LIUQIN_ARTIFACT_PASSWORD repository secret.
-          Pieces suffixed .000, .001, ... are one file split at 1900 MiB: concatenate them in
-          order before extracting. SHA256SUMS.txt covers the pieces as published."
+          notes="Artifacts of package run ${{ inputs.run_id }}, recompressed and republished as release assets so the parts can be fetched by a download manager. Each .7z is AES-256 encrypted with an encrypted header; the password is the LIUQIN_ARTIFACT_PASSWORD repository secret. Pieces suffixed .000, .001, ... are one file split at 1900 MiB: concatenate in suffix order before extracting. SHA256SUMS.txt covers the pieces as published."
           if gh release view "$tag" -R "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release upload "$tag" out/* -R "${{ github.repository }}" --clobber
+            gh release upload "$tag" ./* -R "${{ github.repository }}" --clobber
           else
-            gh release create "$tag" out/* -R "${{ github.repository }}" \
+            gh release create "$tag" ./* -R "${{ github.repository }}" \
               --title "liuqin package ${{ inputs.run_id }}" --notes "$notes"
           fi
           gh release view "$tag" -R "${{ github.repository }}" --json assets \
