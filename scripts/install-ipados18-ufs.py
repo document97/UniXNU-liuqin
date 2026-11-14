@@ -58,12 +58,13 @@ def shell(s):return run(cmd+['shell',s],capture_output=True,text=True).stdout.st
 if run(cmd+['get-state'],capture_output=True,text=True).stdout.strip()!='recovery':raise SystemExit('The phone must be in recovery')
 if a.stream_compression=='gzip':shell('command -v gzip >/dev/null && set -o pipefail')
 target='/dev/block/by-name/userdata';real=shell('readlink -f '+target)
-geometry=dict(device=real,bytes=int(shell('blockdev --getsize64 '+target)),first_512=int(shell('cat /sys/class/block/sda13/start')),logical_block_bytes=int(shell('cat /sys/class/block/sda/queue/logical_block_size')))
+node,disk=pong_paths.userdata_sysfs()
+geometry=dict(device=real,bytes=int(shell('blockdev --getsize64 '+target)),first_512=int(shell('cat /sys/class/block/'+node+'/start')),logical_block_bytes=int(shell('cat /sys/class/block/'+disk+'/queue/logical_block_size')))
 expected=(layout['partition_last_4k']-layout['partition_first_4k']+1)*4096
-if real!='/dev/block/sda13' or geometry['bytes']!=expected or geometry['first_512']!=layout['partition_first_4k']*8 or geometry['logical_block_bytes']!=4096:raise SystemExit('Pong userdata geometry differs')
+if real!=pong_paths.userdata_device() or geometry['bytes']!=expected or geometry['first_512']!=layout['partition_first_4k']*8 or geometry['logical_block_bytes']!=4096:raise SystemExit('Pong userdata geometry differs')
 if delta and (delta['serial']!=a.serial or delta['geometry']!=geometry):
  raise SystemExit('Delta belongs to a different device geometry')
-if shell('ls /sys/class/block/sda13/holders') or any(l.split()[0] in (target,real) for l in shell('cat /proc/mounts').splitlines()):raise SystemExit('userdata must have no active mounts or holders')
+if shell('ls /sys/class/block/'+node+'/holders') or any(l.split()[0] in (target,real) for l in shell('cat /proc/mounts').splitlines()):raise SystemExit('userdata must have no active mounts or holders')
 for w in layout['windows']:
  input_size=tracked['logical_bytes'] if w['name']=='OS' and tracked else Path(w['image']).stat().st_size
  if input_size!=w['size'] or w['offset']%4096 or w['size']%4096 or w['offset']+w['size']>geometry['bytes']:raise SystemExit('An input size or window geometry changed')

@@ -33,8 +33,9 @@ def run(args,**kw):return subprocess.run(args,check=True,**kw)
 def shell(s):return run(cmd+['shell',s],capture_output=True,text=True).stdout.strip()
 if run(cmd+['get-state'],capture_output=True,text=True).stdout.strip()!='recovery':raise SystemExit('Enter recovery first')
 if a.stream_compression=='gzip':shell('command -v gzip >/dev/null && set -o pipefail')
-if shell('readlink -f '+target)!='/dev/block/sda13' or int(shell('blockdev --getsize64 '+target))!=(new['partition_last_4k']-new['partition_first_4k']+1)*4096 or int(shell('cat /sys/class/block/sda13/start'))!=new['partition_first_4k']*8:raise SystemExit('Pong userdata geometry differs')
-if shell('ls /sys/class/block/sda13/holders') or any(l.split()[0] in (target,'/dev/block/sda13') for l in shell('cat /proc/mounts').splitlines()):raise SystemExit('userdata must have no active mounts or holders')
+node,disk=pong_paths.userdata_sysfs()
+if shell('readlink -f '+target)!=pong_paths.userdata_device() or int(shell('blockdev --getsize64 '+target))!=(new['partition_last_4k']-new['partition_first_4k']+1)*4096 or int(shell('cat /sys/class/block/'+node+'/start'))!=new['partition_first_4k']*8:raise SystemExit('Pong userdata geometry differs')
+if shell('ls /sys/class/block/'+node+'/holders') or any(l.split()[0] in (target,pong_paths.userdata_device()) for l in shell('cat /proc/mounts').splitlines()):raise SystemExit('userdata must have no active mounts or holders')
 if dst['offset']+dst['size']>int(shell('blockdev --getsize64 '+target)) or system['offset']+system['size']>dst['offset']:raise SystemExit('Window bounds overlap or exceed userdata')
 a.output_dir.mkdir(parents=True,exist_ok=True);record=a.output_dir/'replacement.json'
 if a.resume:

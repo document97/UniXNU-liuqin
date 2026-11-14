@@ -6,6 +6,8 @@ A required 4 KiB SHNGROOT metadata checksum is unrelated to image verification.
 """
 import argparse,hashlib,json,os,plistlib,struct,subprocess,sys,zlib
 from pathlib import Path
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
+import pong_paths
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
 from sparsebundle import describe,LogicalImage
 p=argparse.ArgumentParser(description=__doc__)
@@ -23,9 +25,10 @@ layout=old['layout'];prior=next(w for w in layout['windows'] if w['name']=='Data
 if (capture['offset'],capture['size'])!=(prior['offset'],prior['size']):raise RuntimeError('live Data preservation describes another window')
 block,size=describe(a.bundle)
 if size!=128000000000 or a.offset%(1<<20):raise RuntimeError('explicit 128GB image and MiB-aligned position required')
-geometry=dict(device=shell('readlink -f /dev/block/by-name/userdata'),bytes=int(shell('blockdev --getsize64 /dev/block/by-name/userdata')),first_512=int(shell('cat /sys/class/block/sda13/start')),logical_block_bytes=int(shell('cat /sys/class/block/sda/queue/logical_block_size')))
+node,disk=pong_paths.userdata_sysfs()
+geometry=dict(device=shell('readlink -f /dev/block/by-name/userdata'),bytes=int(shell('blockdev --getsize64 /dev/block/by-name/userdata')),first_512=int(shell('cat /sys/class/block/'+node+'/start')),logical_block_bytes=int(shell('cat /sys/class/block/'+disk+'/queue/logical_block_size')))
 if geometry!=old['geometry']:raise RuntimeError('Pong geometry differs')
-if shell('ls /sys/class/block/sda13/holders') or any(x.split()[0] in ('/dev/block/sda13','/dev/block/by-name/userdata') for x in shell('cat /proc/mounts').splitlines()):raise RuntimeError('userdata mounted or held')
+if shell('ls /sys/class/block/'+node+'/holders') or any(x.split()[0] in (pong_paths.userdata_device(),'/dev/block/by-name/userdata') for x in shell('cat /proc/mounts').splitlines()):raise RuntimeError('userdata mounted or held')
 if a.offset+size>geometry['bytes']-(1<<30):raise RuntimeError('new Data exceeds tail reserve')
 for w in layout['windows']:
  if a.offset<w['offset']+w['size'] and w['offset']<a.offset+size:raise RuntimeError('new Data overlaps '+w['name'])

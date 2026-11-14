@@ -133,6 +133,35 @@ def adb(explicit=None):
     return work_root() / 'tools/platform-tools/adb'
 
 
+def userdata_device():
+    """The block node userdata shows up as, as board.toml records it.
+
+    Pong's userdata is sda13. On liuqin it is the 35th entry of LUN 0, so it is
+    sda35, and every check that hardcoded sda13 would refuse the write on a
+    geometry that is in fact correct. The flag pair in board.toml [userdata] and
+    the node here describe one partition, so they are read together.
+    """
+    found = _env('PONG_USERDATA_DEVICE')
+    if found:
+        return found
+    board = DEVICE / 'board.toml'
+    if board.is_file():
+        try:
+            import tomllib
+            node = tomllib.loads(board.read_text(encoding='utf-8')).get('userdata', {}).get('device')
+        except Exception:
+            node = None
+        if node:
+            return node
+    return '/dev/block/sda13'
+
+
+def userdata_sysfs():
+    """The sysfs names for userdata and the disk holding it: sda35 and sda."""
+    name = Path(userdata_device()).name
+    return name, (name.rstrip('0123456789') or name)
+
+
 def require(path, what, how):
     """Fail with the missing input and the resolver that supplies it."""
     if not Path(path).exists():

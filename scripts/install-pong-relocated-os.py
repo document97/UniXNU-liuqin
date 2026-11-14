@@ -15,6 +15,8 @@ import zlib
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'tools'))
+sys.path.insert(0,str(ROOT/'scripts'))
+import pong_paths
 from sparsebundle import LogicalImage,describe
 
 
@@ -38,11 +40,12 @@ def main():
     manifest=json.loads((a.boot_image.parent/'stage/EFI/UniXNU/pong-boot-manifest.json').read_text())
     if manifest['root_volume_uuid']!=selected['volume_uuid'] or 'pong_rootful=1' not in manifest['boot_args'].split():raise RuntimeError('matching rootful boot required')
     target='/dev/block/by-name/userdata';real=shell('readlink -f '+target)
+    node,disk=pong_paths.userdata_sysfs()
     geometry=dict(device=real,bytes=int(shell('blockdev --getsize64 '+target)),
-        first_512=int(shell('cat /sys/class/block/sda13/start')),
-        logical_block_bytes=int(shell('cat /sys/class/block/sda/queue/logical_block_size')))
-    if real!='/dev/block/sda13' or geometry['logical_block_bytes']!=4096 or geometry['first_512']!=old['partition_first_4k']*8 or geometry['bytes']!=(old['partition_last_4k']-old['partition_first_4k']+1)*4096:raise RuntimeError('Pong userdata geometry differs')
-    if shell('ls /sys/class/block/sda13/holders') or any(line.split()[0] in (target,real) for line in shell('cat /proc/mounts').splitlines()):raise RuntimeError('userdata has active mounts/holders')
+        first_512=int(shell('cat /sys/class/block/'+node+'/start')),
+        logical_block_bytes=int(shell('cat /sys/class/block/'+disk+'/queue/logical_block_size')))
+    if real!=pong_paths.userdata_device() or geometry['logical_block_bytes']!=4096 or geometry['first_512']!=old['partition_first_4k']*8 or geometry['bytes']!=(old['partition_last_4k']-old['partition_first_4k']+1)*4096:raise RuntimeError('Pong userdata geometry differs')
+    if shell('ls /sys/class/block/'+node+'/holders') or any(line.split()[0] in (target,real) for line in shell('cat /proc/mounts').splitlines()):raise RuntimeError('userdata has active mounts/holders')
     start,size=selected['offset'],selected['size'];end=start+size
     if start%(1<<20) or size%4096 or end>geometry['bytes']:raise RuntimeError('OS bounds')
     for window in old['windows']:
