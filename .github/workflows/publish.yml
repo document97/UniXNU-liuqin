@@ -86,16 +86,36 @@ jobs:
           while IFS= read -r f
           do
             name="$(basename "$f")"
-            printf '\n=== %s (%s B) ===\n' "$f" "$(stat -c %s "$f")"
+            size="$(stat -c %s "$f")"
+            printf '\n=== %s (%s B) ===\n' "$f" "$size"
             case "$f" in
               *.7z)
                 base="${name%.7z}"
                 dest="out/${base}.7z"
-                7z x -p"${ARTIFACT_PASSWORD}" -so "$f" \
-                  | 7z a -t7z -mx=5 -mmt=on -mhe=on -p"${ARTIFACT_PASSWORD}" \
-                        -si"${base}" "$dest" > /dev/null
+                if [ "$size" -gt $((1024*1024*1024)) ]; then
+                  # The userdata parts are single-file archives written with
+                  # -mx=0 on a Linux runner. p7zip's -so handles those and
+                  # streaming keeps a second 5 GiB copy off the runner disk.
+                  7z x -p"${ARTIFACT_PASSWORD}" -so "$f" \
+                    | 7z a -t7z -mx=5 -mmt=on -mhe=on -p"${ARTIFACT_PASSWORD}" \
+                          -si"${base}" "$dest" > /dev/null
+                else
+                  # Small archives are multi-file trees (liuqin-package.7z has
+                  # boot/, payload/, kernel/ and logs). p7zip's -so silently
+                  # emits only a few hundred bytes for those, so a recompress
+                  # through the pipe produces a valid but EMPTY archive. They
+                  # are already -mx=1 compressed, so copying loses almost
+                  # nothing and keeps every file.
+                  cp -f "$f" "$dest"
+                fi
                 7z t -p"${ARTIFACT_PASSWORD}" "$dest" > /dev/null
-                echo "recompressed ${base}: $(stat -c %s "$dest") B"
+                # A 832-byte "recompressed" 5 GiB part must never be published.
+                if [ "$size" -gt $((1024*1024)) ] \
+                   && [ "$(stat -c %s "$dest")" -lt $((1024*1024)) ]; then
+                  echo "${name}: ${size} B became $(stat -c %s "$dest") B"
+                  exit 1
+                fi
+                echo "published ${base}: $(stat -c %s "$dest") B (from ${size} B)"
                 rm -f "$f"
                 ;;
               *)
