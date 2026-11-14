@@ -23,6 +23,11 @@ on:
         description: the package run whose artifacts to publish
         required: true
         type: string
+      userdata_run_id:
+        description: the run holding liuqin-userdata, when it is not run_id
+        required: false
+        type: string
+        default: ""
 
 jobs:
   publish:
@@ -61,6 +66,11 @@ jobs:
         run: |
           set -euo pipefail
           gh run download "${{ inputs.run_id }}" -R "${{ github.repository }}" -D in
+          # A run that reused an earlier userdata image holds only the boot side:
+          # the 19 GB is in the run that built it.
+          if [ -n "${{ inputs.userdata_run_id }}" ]; then
+            gh run download "${{ inputs.userdata_run_id }}" -R "${{ github.repository }}" -D in/userdata
+          fi
           find in -type f -printf '%12s %p\n' | sort -rn
           df -h /
 
@@ -70,15 +80,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          # Each pass holds one source part and its replacement, so the source is
-          # deleted as soon as the replacement tests good.
-          shopt -s nullglob
-          for f in in/*
+          # gh run download writes one directory per artifact, so the files are a
+          # level down. Each pass holds one source part and its replacement, so the
+          # source goes as soon as the replacement tests good.
+          while IFS= read -r f
           do
+            name="$(basename "$f")"
             printf '\n=== %s (%s B) ===\n' "$f" "$(stat -c %s "$f")"
             case "$f" in
               *.7z)
-                base="$(basename "$f" .7z)"
+                base="${name%.7z}"
                 dest="out/${base}.7z"
                 7z x -p"${ARTIFACT_PASSWORD}" -so "$f" \
                   | 7z a -t7z -mx=5 -mmt=on -mhe=on -p"${ARTIFACT_PASSWORD}" \
@@ -88,11 +99,11 @@ jobs:
                 rm -f "$f"
                 ;;
               *)
-                cp "$f" "out/$(basename "$f")"
+                cp -f "$f" "out/${name}"
                 ;;
             esac
             df -h / | tail -1
-          done
+          done < <(find in -type f | sort)
 
       - name: split into under-2-GiB pieces
         run: |
