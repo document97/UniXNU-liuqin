@@ -1,0 +1,85 @@
+diff --git a/libkern/crypto/corecrypto_rand.c b/libkern/crypto/corecrypto_rand.c
+--- a/libkern/crypto/corecrypto_rand.c
++++ b/libkern/crypto/corecrypto_rand.c
+@@ -30,6 +30,22 @@
+ #include <corecrypto/ccrng.h>
+ #include <libkern/crypto/rand.h>
+ 
++/*
++ * This port is built without the corecrypto kext, so g_crypto_funcs stays NULL
++ * and every entry point below dereferences it.  kmem_crypto_init() is a
++ * STARTUP(EARLY_BOOT) that calls crypto_random_kmem_ctx_size() unconditionally,
++ * which is where this kernel faulted at far=0x150 - the offset of
++ * random_kmem_ctx_size_fn in the table.
++ *
++ * The kernel PRNG is the right substitute here: read_random() already falls
++ * back to the early HMAC-SHA256 DRBG when no kernel PRNG is registered (see
++ * osfmk/prng/prng_random.c), and it is seeded from /chosen/random-seed.
++ *
++ * Declared in <sys/random.h>, which is a BSD header; only the prototype is
++ * needed in this translation unit.
++ */
++extern void read_random(void *buffer, u_int numbytes);
++
+ int
+ cc_rand_generate(void *out, size_t outlen)
+ {
+@@ -58,6 +74,10 @@ crypto_random_generate(
+ 	void *random,
+ 	size_t random_size)
+ {
++	if (g_crypto_funcs == NULL) {
++		read_random(random, (u_int)random_size);
++		return;
++	}
+ 	g_crypto_funcs->random_generate_fn(ctx, random, random_size);
+ }
+ 
+@@ -67,12 +87,38 @@ crypto_random_uniform(
+ 	uint64_t bound,
+ 	uint64_t *random)
+ {
++	if (g_crypto_funcs == NULL) {
++		uint64_t value;
++		uint64_t limit;
++
++		/*
++		 * Rejection sampling: accept only the values that divide evenly by
++		 * bound so the result is not biased toward the low residues.
++		 */
++		if (bound == 0) {
++			*random = 0;
++			return;
++		}
++		limit = ~(uint64_t)0 - (~(uint64_t)0 % bound);
++		do {
++			read_random(&value, sizeof(value));
++		} while (value >= limit);
++		*random = value % bound;
++		return;
++	}
+ 	g_crypto_funcs->random_uniform_fn(ctx, bound, random);
+ }
+ 
+ size_t
+ crypto_random_kmem_ctx_size(void)
+ {
++	if (g_crypto_funcs == NULL) {
++		/*
++		 * kmem_crypto_init() passes this to zalloc_percpu_permanent(), so it
++		 * has to be non-zero, but the fallbacks above never read the context.
++		 */
++		return sizeof(uint64_t);
++	}
+ 	return g_crypto_funcs->random_kmem_ctx_size_fn();
+ }
+ 
+@@ -80,5 +126,8 @@ void
+ crypto_random_kmem_init(
+ 	crypto_random_ctx_t ctx)
+ {
++	if (g_crypto_funcs == NULL) {
++		return;
++	}
+ 	g_crypto_funcs->random_kmem_init_fn(ctx);
+ }
