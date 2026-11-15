@@ -663,7 +663,11 @@ jobs:
             # checkout both change mtime, which would invalidate everything.
             printf 'CCACHE_COMPILERCHECK=content\n'
             printf 'CCACHE_SLOPPINESS=time_macros,include_file_ctime,include_file_mtime,file_stat_matches\n'
-            printf 'CCACHE_MAXSIZE=2G\n'
+            # 913 XNU translation units plus the kit's own objects do not fit in
+            # 2 GB without evicting what this run is about to ask for again.
+            # GitHub's cache quota is 10 GB per repository, so 6 GB leaves one
+            # full generation plus headroom rather than churning every entry.
+            printf 'CCACHE_MAXSIZE=6G\n'
             printf 'CCACHE_UMASK=002\n'
           } >> "$GITHUB_ENV"
           ccache --version | head -1
@@ -705,6 +709,7 @@ jobs:
           ccache --show-stats || true
           calls="$(ccache --show-stats | awk -F'[: /]+' '/^Cacheable calls/ {print $2; exit}')"
           echo "cacheable calls: ${calls:-unknown}"
+          echo "cache size: $(du -sh "${CCACHE_DIR}" 2>/dev/null | cut -f1 || echo none)"
           if [ "${calls:-0}" = "0" ]; then
             echo "::warning::ccache saw no compiles: the PATH shim did not take, so the cache cannot help"
           fi
