@@ -132,28 +132,28 @@ diff --git a/libkern/crypto/corecrypto_sha1.c b/libkern/crypto/corecrypto_sha1.c
 + */
 +#include <libkern/crypto/sha1.h>
 +#include <sys/types.h>
-+#include <string.h>
++#include <libkern/libkern.h>
 +
 +#define PONG_SHA1_BLOCK 64
 +
-+static inline uint32_t
-+pong_rol32(uint32_t value, unsigned int bits)
++static inline u_int32_t
++pong_rol32(u_int32_t value, unsigned int bits)
 +{
 +	return (value << bits) | (value >> (32 - bits));
 +}
 +
 +static void
-+pong_sha1_compress(uint32_t state[5], const uint8_t block[PONG_SHA1_BLOCK])
++pong_sha1_compress(u_int32_t state[5], const u_int8_t block[PONG_SHA1_BLOCK])
 +{
-+	uint32_t w[80];
-+	uint32_t a, b, c, d, e;
++	u_int32_t w[80];
++	u_int32_t a, b, c, d, e;
 +	int i;
 +
 +	for (i = 0; i < 16; i++) {
-+		w[i] = ((uint32_t)block[i * 4] << 24) |
-+		    ((uint32_t)block[i * 4 + 1] << 16) |
-+		    ((uint32_t)block[i * 4 + 2] << 8) |
-+		    (uint32_t)block[i * 4 + 3];
++		w[i] = ((u_int32_t)block[i * 4] << 24) |
++		    ((u_int32_t)block[i * 4 + 1] << 16) |
++		    ((u_int32_t)block[i * 4 + 2] << 8) |
++		    (u_int32_t)block[i * 4 + 3];
 +	}
 +	for (i = 16; i < 80; i++) {
 +		w[i] = pong_rol32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
@@ -166,7 +166,7 @@ diff --git a/libkern/crypto/corecrypto_sha1.c b/libkern/crypto/corecrypto_sha1.c
 +	e = state[4];
 +
 +	for (i = 0; i < 80; i++) {
-+		uint32_t f, k, t;
++		u_int32_t f, k, t;
 +
 +		if (i < 20) {
 +			f = (b & c) | (~b & d);
@@ -212,10 +212,10 @@ diff --git a/libkern/crypto/corecrypto_sha1.c b/libkern/crypto/corecrypto_sha1.c
 +void
 +SHA1Update(SHA1_CTX *ctx, const void *data, size_t len)
 +{
-+	const uint8_t *input = (const uint8_t *)data;
++	const u_int8_t *input = (const u_int8_t *)data;
 +	size_t used = (size_t)((ctx->c.b64[0] >> 3) % PONG_SHA1_BLOCK);
 +
-+	ctx->c.b64[0] += (uint64_t)len << 3;
++	ctx->c.b64[0] += (u_int64_t)len << 3;
 +
 +	while (len > 0) {
 +		size_t room = PONG_SHA1_BLOCK - used;
@@ -236,9 +236,9 @@ diff --git a/libkern/crypto/corecrypto_sha1.c b/libkern/crypto/corecrypto_sha1.c
 +void
 +SHA1Final(void *digest, SHA1_CTX *ctx)
 +{
-+	uint64_t bits = ctx->c.b64[0];
++	u_int64_t bits = ctx->c.b64[0];
 +	size_t used = (size_t)((bits >> 3) % PONG_SHA1_BLOCK);
-+	uint8_t *out = (uint8_t *)digest;
++	u_int8_t *out = (u_int8_t *)digest;
 +	int i;
 +
 +	ctx->m.b8[used++] = 0x80;
@@ -250,12 +250,12 @@ diff --git a/libkern/crypto/corecrypto_sha1.c b/libkern/crypto/corecrypto_sha1.c
 +	}
 +	memset(ctx->m.b8 + used, 0, PONG_SHA1_BLOCK - 8 - used);
 +	for (i = 0; i < 8; i++) {
-+		ctx->m.b8[PONG_SHA1_BLOCK - 8 + i] = (uint8_t)(bits >> (56 - 8 * i));
++		ctx->m.b8[PONG_SHA1_BLOCK - 8 + i] = (u_int8_t)(bits >> (56 - 8 * i));
 +	}
 +	pong_sha1_compress(ctx->h.b32, ctx->m.b8);
 +
 +	for (i = 0; i < SHA1_RESULTLEN; i++) {
-+		out[i] = (uint8_t)(ctx->h.b32[i >> 2] >> (24 - 8 * (i & 3)));
++		out[i] = (u_int8_t)(ctx->h.b32[i >> 2] >> (24 - 8 * (i & 3)));
 +	}
 +}
 +
