@@ -27,6 +27,10 @@ void sheng_audio_probe(void);
 void sheng_battery_start(void);
 void PongBatteryStaticInit(void);
 volatile int32_t native_battery_stats[16];
+// Same storage rule as the battery record above: PongUsbDevice.h only declares
+// it, so the definition has to live in a translation unit that is actually
+// linked. PongUsbDevice.h is included at the top of this file.
+volatile int32_t native_usb_stats[16];
 void pong_power_start_optional(void) {
  pong_rpmh_init();
  // Register the transport classes independently of ADSP readiness. Actual
