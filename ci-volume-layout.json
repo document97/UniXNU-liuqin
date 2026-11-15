@@ -1,0 +1,13 @@
+{
+  "ci_placeholder": false,
+  "note": "Volume UUIDs of the 22H374 volume set already written to the device (run 43581151943), uppercase as diskutil and IOMedia print them. Source: read from the APFS volume headers. A run that rebuilds the userdata image overwrites this file from its own volume-layout artifact; it is committed so a boot-side-only rebuild still compiles the kernel with the UUIDs the flashed volumes actually carry.",
+  "os": {
+    "uuid": "B07DF049-7AD9-47B5-9F8F-9EE728056398"
+  },
+  "systemos": {
+    "uuid": "18C14D24-03A3-4696-BE0C-ABF45D9DD147"
+  },
+  "data": {
+    "uuid": "0FB99643-7AFF-4F8D-AAAF-68502BFD01EB"
+  }
+}
