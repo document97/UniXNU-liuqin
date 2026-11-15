@@ -654,9 +654,30 @@ jobs:
           shim="${RUNNER_TEMP}/ccache-shim"
           mkdir -p "$shim"
           for t in clang clang++ cc c++; do ln -sf "$(command -v ccache)" "$shim/$t"; done
+          # A PATH shim alone does nothing here. makedefs/MakeInc.cmd runs
+          #
+          #   ifeq ($(origin CC),default)
+          #       export CC := $(shell $(XCRUN) -sdk $(SDKROOT) -find clang)
+          #
+          # so unless CC is already in the environment, the makefiles replace it
+          # with an absolute path into Xcode and never look at PATH again; the
+          # previous run compiled with
+          # /Applications/Xcode_16.4.app/.../Toolchains/XcodeDefault.xctoolchain/usr/bin/clang
+          # and ccache saw zero compiles. Exporting CC/CXX gives them the
+          # environment origin, so the makefiles keep the bare name and PATH
+          # decides. XCRUN is a plain make assignment, not overridable, so this
+          # is the only lever short of patching upstream.
+          #
+          # CCACHE_PATH must then point at the toolchain xcrun resolves, or the
+          # cached build would silently use a different compiler than the one
+          # that produced the kernel under test.
+          real_cc="$(/usr/bin/xcrun -find clang)"
+          toolchain_bin="$(dirname "${real_cc}")"
           {
             printf 'PATH=%s:%s\n' "$shim" "$PATH"
-            printf 'CCACHE_PATH=%s\n' "${LLVM_KEG}/bin:/usr/bin:/bin"
+            printf 'CC=clang\n'
+            printf 'CXX=clang++\n'
+            printf 'CCACHE_PATH=%s:/usr/bin:/bin\n' "${toolchain_bin}"
             printf 'CCACHE_BASEDIR=%s\n' "$GITHUB_WORKSPACE"
             printf 'CCACHE_NOHASHDIR=true\n'
             # Default compiler check is mtime+size; a restored cache and a fresh
@@ -671,7 +692,25 @@ jobs:
             printf 'CCACHE_UMASK=002\n'
           } >> "$GITHUB_ENV"
           ccache --version | head -1
+          echo "compiler: ${real_cc} ($("${real_cc}" --version | head -1))"
           echo "ccache dir: ${CCACHE_DIR} ($(du -sh "${CCACHE_DIR}" 2>/dev/null | cut -f1 || echo empty))"
+          # Prove the wiring before a 30 minute build depends on it, because a
+          # dead shim is indistinguishable from a slow machine afterwards. A
+          # failure warns instead of failing: losing the kernel over a cache is
+          # the worse trade.
+          printf 'int main(void) { return 0; }\n' > "${RUNNER_TEMP}/ccache-probe.c"
+          if PATH="${shim}:${PATH}" CCACHE_PATH="${toolchain_bin}:/usr/bin:/bin" \
+             "${shim}/clang" -c "${RUNNER_TEMP}/ccache-probe.c" -o "${RUNNER_TEMP}/ccache-probe.o" \
+             2>"${RUNNER_TEMP}/ccache-probe.err"; then
+            calls="$(ccache --show-stats | awk '/^Cacheable calls:/ {print $3; exit}')"
+            echo "probe compile reached ccache: cacheable calls ${calls:-unknown}"
+            if [ "${calls:-0}" = "0" ]; then
+              echo "::warning::the probe compiled but ccache did not count it"
+            fi
+          else
+            echo "::warning::ccache probe failed, so the kernel build will run uncached"
+            cat "${RUNNER_TEMP}/ccache-probe.err"
+          fi
           sysctl -n hw.ncpu
       - name: package
         working-directory: device
@@ -707,7 +746,7 @@ jobs:
           # asked to do; zero means the Makefiles bypassed PATH and the cache is
           # dead weight rather than a silent no-op.
           ccache --show-stats || true
-          calls="$(ccache --show-stats | awk -F'[: /]+' '/^Cacheable calls/ {print $2; exit}')"
+          calls="$(ccache --show-stats | awk '/^Cacheable calls:/ {print $3; exit}')"
           echo "cacheable calls: ${calls:-unknown}"
           echo "cache size: $(du -sh "${CCACHE_DIR}" 2>/dev/null | cut -f1 || echo none)"
           if [ "${calls:-0}" = "0" ]; then
