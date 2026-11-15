@@ -636,7 +636,8 @@ jobs:
       # actions/cache cannot update an entry, so the rolling key plus a prefix
       # in restore-keys is what makes the cache advance from run to run.
       - name: ccache cache
-        uses: actions/cache@v4
+        id: ccache-restore
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ccache-${{ env.UNIXNU_REF }}-${{ github.run_id }}
@@ -647,62 +648,72 @@ jobs:
           set -euo pipefail
           export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
           command -v ccache >/dev/null || brew install ccache
-          # The kit recipe does not set CC, so the Makefiles resolve "clang" by
-          # name: a shim directory in front of PATH routes every compile through
-          # ccache. CCACHE_PATH must not contain the shim itself or ccache would
-          # find itself as the compiler.
-          shim="${RUNNER_TEMP}/ccache-shim"
-          mkdir -p "$shim"
-          for t in clang clang++ cc c++; do ln -sf "$(command -v ccache)" "$shim/$t"; done
-          # A PATH shim alone does nothing here. makedefs/MakeInc.cmd runs
+
+          # The kit recipe does not set CC, so makedefs/MakeInc.cmd picks the
+          # compiler itself:
           #
           #   ifeq ($(origin CC),default)
           #       export CC := $(shell $(XCRUN) -sdk $(SDKROOT) -find clang)
           #
-          # so unless CC is already in the environment, the makefiles replace it
-          # with an absolute path into Xcode and never look at PATH again; the
-          # previous run compiled with
-          # /Applications/Xcode_16.4.app/.../Toolchains/XcodeDefault.xctoolchain/usr/bin/clang
-          # and ccache saw zero compiles. Exporting CC/CXX gives them the
-          # environment origin, so the makefiles keep the bare name and PATH
-          # decides. XCRUN is a plain make assignment, not overridable, so this
-          # is the only lever short of patching upstream.
+          # An absolute path into Xcode never consults PATH again, which is why a
+          # PATH shim in front of ccache saw zero compiles. Exporting CC from the
+          # environment gives it a non-default origin, so the makefiles keep the
+          # value as written - and that value can be the wrapper itself.
           #
-          # CCACHE_PATH must then point at the toolchain xcrun resolves, or the
-          # cached build would silently use a different compiler than the one
-          # that produced the kernel under test.
+          # The wrapper is spelled out with an absolute compiler instead of
+          # relying on PATH: /usr/local/opt/llvm@18/bin sits ahead of /usr/bin on
+          # these runners (the kit links with that keg's lld), and a bare "clang"
+          # resolved to Homebrew LLVM 18 in run 43726464692. LLVM has no
+          # __builtin_xnu_type_summary, so every kalloc_type() in bsd, osfmk,
+          # iokit and security failed with "use of unknown builtin" five minutes
+          # in. ccache did not mask the mistake: it cached the wrong compiler
+          # faithfully. Naming the compiler removes PATH from the question.
+          ccache_bin="$(command -v ccache)"
           real_cc="$(/usr/bin/xcrun -find clang)"
-          toolchain_bin="$(dirname "${real_cc}")"
+          real_cxx="$(/usr/bin/xcrun -find clang++)"
           {
-            printf 'PATH=%s:%s\n' "$shim" "$PATH"
-            printf 'CC=clang\n'
-            printf 'CXX=clang++\n'
-            printf 'CCACHE_PATH=%s:/usr/bin:/bin\n' "${toolchain_bin}"
+            printf 'CC=%s %s\n' "${ccache_bin}" "${real_cc}"
+            printf 'CXX=%s %s\n' "${ccache_bin}" "${real_cxx}"
             printf 'CCACHE_BASEDIR=%s\n' "$GITHUB_WORKSPACE"
             printf 'CCACHE_NOHASHDIR=true\n'
             # Default compiler check is mtime+size; a restored cache and a fresh
             # checkout both change mtime, which would invalidate everything.
             printf 'CCACHE_COMPILERCHECK=content\n'
             printf 'CCACHE_SLOPPINESS=time_macros,include_file_ctime,include_file_mtime,file_stat_matches\n'
-            # 913 XNU translation units plus the kit's own objects do not fit in
-            # 2 GB without evicting what this run is about to ask for again.
-            # GitHub's cache quota is 10 GB per repository, so 6 GB leaves one
-            # full generation plus headroom rather than churning every entry.
-            printf 'CCACHE_MAXSIZE=6G\n'
+            # 913 XNU translation units plus the kit's own objects need more than
+            # 2 GB, and GitHub's cache quota is 10 GB per repository. 4 GB holds
+            # one generation at full width and leaves room for the previous one
+            # to survive long enough to be restored.
+            printf 'CCACHE_MAXSIZE=4G\n'
             printf 'CCACHE_UMASK=002\n'
           } >> "$GITHUB_ENV"
-          ccache --version | head -1
+          echo "ccache: $("${ccache_bin}" --version | head -1)"
           echo "compiler: ${real_cc} ($("${real_cc}" --version | head -1))"
+          echo "compiler++: ${real_cxx}"
           echo "ccache dir: ${CCACHE_DIR} ($(du -sh "${CCACHE_DIR}" 2>/dev/null | cut -f1 || echo empty))"
-          # Prove the wiring before a 30 minute build depends on it, because a
-          # dead shim is indistinguishable from a slow machine afterwards. A
-          # failure warns instead of failing: losing the kernel over a cache is
-          # the worse trade.
+
+          # Apple clang only: __builtin_xnu_type_summary backs every kalloc_type()
+          # call in the tree. A toolchain without it fails hundreds of files deep,
+          # so ask the exact wrapped compiler now and stop before the build. This
+          # is a hard failure on purpose - a green-looking job that cannot compile
+          # kalloc_type() wastes a runner and a review cycle.
+          cat > "${RUNNER_TEMP}/type-summary-probe.c" <<'PROBE'
+          struct probe_s { int a; };
+          int probe_fn(void) { return (int)__builtin_xnu_type_summary(struct probe_s); }
+          PROBE
+          if ! "${ccache_bin}" "${real_cc}" -fsyntax-only -target arm64-apple-ios18 \
+                 "${RUNNER_TEMP}/type-summary-probe.c" 2>"${RUNNER_TEMP}/type-summary-probe.err"; then
+            cat "${RUNNER_TEMP}/type-summary-probe.err"
+            echo "::error::${real_cc} does not know __builtin_xnu_type_summary, so kalloc_type() cannot compile"
+            exit 1
+          fi
+          echo "type summary builtin: ok"
+
+          # Prove the wrapper reaches ccache, because a bypass is invisible later.
           printf 'int main(void) { return 0; }\n' > "${RUNNER_TEMP}/ccache-probe.c"
-          if PATH="${shim}:${PATH}" CCACHE_PATH="${toolchain_bin}:/usr/bin:/bin" \
-             "${shim}/clang" -c "${RUNNER_TEMP}/ccache-probe.c" -o "${RUNNER_TEMP}/ccache-probe.o" \
-             2>"${RUNNER_TEMP}/ccache-probe.err"; then
-            calls="$(ccache --show-stats | awk '/^Cacheable calls:/ {print $3; exit}')"
+          if "${ccache_bin}" "${real_cc}" -c "${RUNNER_TEMP}/ccache-probe.c" \
+               -o "${RUNNER_TEMP}/ccache-probe.o" 2>"${RUNNER_TEMP}/ccache-probe.err"; then
+            calls="$("${ccache_bin}" --show-stats | awk '/^Cacheable calls:/ {print $3; exit}')"
             echo "probe compile reached ccache: cacheable calls ${calls:-unknown}"
             if [ "${calls:-0}" = "0" ]; then
               echo "::warning::the probe compiled but ccache did not count it"
@@ -750,8 +761,17 @@ jobs:
           echo "cacheable calls: ${calls:-unknown}"
           echo "cache size: $(du -sh "${CCACHE_DIR}" 2>/dev/null | cut -f1 || echo none)"
           if [ "${calls:-0}" = "0" ]; then
-            echo "::warning::ccache saw no compiles: the PATH shim did not take, so the cache cannot help"
+            echo "::warning::ccache saw no compiles: CC did not reach ccache, so the cache cannot help"
           fi
+      - name: ccache save
+        # Saves even when package failed: a compile error 700 files in still
+        # leaves 700 usable objects, and keeping them is what makes the retry
+        # incremental instead of another full build.
+        if: always() && steps.ccache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ env.UNIXNU_REF }}-${{ github.run_id }}
       - name: check the kernel the payload step patches
         run: |
           set -euo pipefail
