@@ -31,7 +31,15 @@ void pong_power_start_optional(void) {
  pong_rpmh_init();
  // Register the transport classes independently of ADSP readiness. Actual
  // USB/audio services still publish only after their own hardware succeeds.
- if(pong_audio_service_classes_ready())PongUsb::start();
+ //
+ // USB owns no meta-class: PongUsb::publish() only instantiates a plain
+ // IOService, and its worker waits for UFS on its own thread. Gating it on the
+ // audio registration therefore coupled the only debug transport to an
+ // unrelated optional subsystem, and any audio failure left the port dead with
+ // no way to observe the reason. Start it first so the transport exists before
+ // anything that can abort this thread runs.
+ PongUsb::start();
+ (void)pong_audio_service_classes_ready();
  unsigned enabled=0;PE_parse_boot_argn("pong_adsp",&enabled,sizeof(enabled));
  if(enabled!=2)return;
  static uint32_t started;

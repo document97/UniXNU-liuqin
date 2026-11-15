@@ -25,6 +25,16 @@ extern "C" bool pong_usb_mux_bridge_ready(void);
 extern "C" void pong_usb_mux_attached(bool);
 extern "C" bool pong_usb_mux_serial(char *,unsigned);
 extern "C" unsigned pong_usb_mux_transmit(void *,unsigned);
+// Live transport record, same shape and purpose as native_battery_stats: the
+// only way to tell "never started" from "started and lost the port" when the
+// console itself is what failed. Written by the worker only.
+//   [0] stage (UsbStage*), [1] last PMIC session reading, [2] direct probes,
+//   [3] soft faults, [4] sessions established, [5] configuration publishes,
+//   [6] last DSTS, [7] last QSCRATCH 0x10, [8] events retired,
+//   [9] RX bytes, [10] TX bytes, [11] capture ring mapped,
+//   [12] endpoint command failures, [13] firmware PHY retained,
+//   [14] Mux function enabled, [15] last fatal stage
+extern "C" volatile int32_t native_usb_stats[16];
 #include "Dwc3Registers.h"
 namespace PongUsb {
 #include "../NativeUfs/SmmuTakeover.h"
@@ -39,6 +49,23 @@ struct Map {
 };
 static Map core,gcc,smmu,dma,log,qscratch;
 #include "PongUsbPhy.h"
+// Stage codes for native_usb_stats[0].
+enum : int32_t {
+ UsbStageIdle=0,UsbStageUfsWait=1,UsbStageInit=2,UsbStageSession=3,
+ UsbStageConfigured=4,UsbStageFatal=5
+};
+static inline void usbStat(unsigned index,int32_t value) {
+ if(index<16)__atomic_store_n(&native_usb_stats[index],value,__ATOMIC_RELEASE);
+}
+static inline void usbCount(unsigned index) {
+ usbStat(index,__atomic_load_n(&native_usb_stats[index],__ATOMIC_ACQUIRE)+1);
+}
+// A port that gives up on the first line-state timeout can only be recovered
+// by replugging the cable, which is exactly what a headless bring-up cannot do.
+// The manager may be late, the far end may renegotiate, or a charger may
+// suspend the session; none of those justify retiring the transport.
+static constexpr unsigned kSessionProbeMs=3000,kSessionFallbackMs=8000,
+                          kProbeIntervalMs=2000,kDtrGraceMs=5000,kMaxSoftFaults=64;
 static uint64_t physical;
 static unsigned eventOffset,stage,statusDep,controlBytes,controlDep,packet=64;
 static bool failed,configured,dtr,txActive,rxActive,logReady;
@@ -46,7 +73,11 @@ static bool cableConnected;
 static bool muxEnabled,muxRxActive,muxTxActive,muxZlp;
 static bool iphoneIdentity;
 static unsigned muxTxBytes;
-static uint64_t bridgeStarted;
+static uint64_t bridgeStarted,sessionStartMs,configuredAt,lastProbeMs;
+static void usbFatal(int32_t stage) {
+ usbStat(0,UsbStageFatal);usbStat(15,stage);failed=true;
+ IOLog("PongUSB: transport retired at stage %d; counters stay readable\n",int(stage));
+}
 static char commandLine[64];static unsigned commandLength;static bool commandDiscard;
 static uint32_t logCursor,txEnd;
 static IOService *service;
@@ -109,7 +140,13 @@ static bool cmd(unsigned ep,unsigned command,uint32_t p0=0,uint32_t p1=0,uint32_
   if(!(v&DWC3_DEPCMD_CMDACT)){if(!DWC3_DEPCMD_STATUS(v))return true;break;}
   IODelay(1);
  }
- IOLog("PongUSB: endpoint %u command %x failed status=%x\n",ep,command,core.r(DWC3_DEPCMD(ep)));failed=true;return false;
+ IOLog("PongUSB: endpoint %u command %x failed status=%x\n",ep,command,core.r(DWC3_DEPCMD(ep)));
+ usbCount(12);
+ // EP0 carries every control transfer: losing it means the host can never
+ // address this device again. A data endpoint is re-configurable by the next
+ // SET_CONFIGURATION and must not retire the only debug transport.
+ if(ep==0)usbFatal(2);
+ return false;
 }
 static bool transfer(unsigned ep,unsigned trb,unsigned buffer,unsigned size,unsigned type) {
  auto p=(volatile uint32_t *)bytes(trb);uint64_t address=physical+buffer;
@@ -180,11 +217,26 @@ static void setup() {
  } else if(type==0 && request==9 && !controlBytes && value<=1) {
   if(configured&&value==1){statusStage(1);return;}
   configured=value!=0;
+  if(configured)configuredAt=phyNow();
   if(configured) {
-   if(!endpoint(2,2,packet)||!endpoint(3,2,packet)||!endpoint(5,3,16))return;
+   if(!endpoint(2,2,packet)||!endpoint(3,2,packet)||!endpoint(5,3,16)) {
+    // Returning without a status stage leaves the host waiting until its own
+    // timeout expires, then dropping the port with no clue why. Stall the
+    // request instead: the host learns the configuration was refused and may
+    // retry, and the failure stays visible in the counters.
+    IOLog("PongUSB: console endpoints refused; stalling SET_CONFIGURATION\n");
+    configured=false;stallControl();return;
+   }
    core.w(DWC3_DALEPENA,core.r(DWC3_DALEPENA)|0x2c);
    if(muxEnabled) {
-    if(!endpoint(6,2,packet)||!endpoint(7,2,packet))return;
+    if(!endpoint(6,2,packet)||!endpoint(7,2,packet)) {
+     // The Mux function is optional. Refuse this configuration rather than
+     // advertise a three-interface composite that cannot carry traffic, and
+     // re-enumerate with the console-only descriptors next time.
+     muxEnabled=false;usbStat(14,0);configured=false;
+     IOLog("PongUSB: Mux endpoints refused; next enumeration keeps the console only\n");
+     stallControl();return;
+    }
     core.w(DWC3_DALEPENA,core.r(DWC3_DALEPENA)|0xc0);pong_usb_mux_session(true);
    }
   } else disconnect();
@@ -214,9 +266,12 @@ static void setup() {
 static void publish() {
  if(service)return;
  service=new IOService;
- if(!service || !service->init() || !service->attach(IOService::getPlatform()) || !service->start(IOService::getPlatform()))return;
+ if(!service || !service->init() || !service->attach(IOService::getPlatform()) || !service->start(IOService::getPlatform())) {
+  IOLog("PongUSB: console nub not published; the CDC transport itself continues\n");return;
+ }
  service->setName("PongDwc3Console");service->setProperty("PongUsbConfigured",true);
  service->setProperty("Transport","DWC3 CDC-ACM; physical USB host configured");service->registerService();
+ usbCount(5);
  IOLog("PongUSB: host configured real CDC console and %s, SID0 DMA\n",muxEnabled?"native-service Mux endpoints":"no Mux function");
 }
 static void epEvent(uint32_t event) {
@@ -229,7 +284,10 @@ static void epEvent(uint32_t event) {
     unsigned residual=dma.r(RxTrb+8)&0xffffff;
     // SHORT/IOC/LST are successful completion flags, not transfer errors.
     // A command line is normally a short OUT packet.
-    if(!(dma.r(RxTrb+12)&DWC3_TRB_CTRL_HWO)&&residual<=packet && !(status&1))input(bytes(RxData),packet-residual);
+    if(!(dma.r(RxTrb+12)&DWC3_TRB_CTRL_HWO)&&residual<=packet && !(status&1)) {
+     input(bytes(RxData),packet-residual);
+     usbStat(9,native_usb_stats[9]+int32_t(packet-residual));
+    }
     rxActive=false;
    }
    if(ep==7) {
@@ -253,22 +311,43 @@ static void epEvent(uint32_t event) {
 }
 static void events() {
  unsigned count=core.r(DWC3_GEVNTCOUNT(0))&0xfffc;
- if(count>4096){failed=true;IOLog("PongUSB: event ring overrun\n");return;}
+ if(count>4096){
+  // The ring cannot be trusted once it is this far ahead, but dropping the
+  // transport over it would cost the only channel that can report the cause.
+  // Retire the whole ring and let the endpoints re-arm.
+  core.w(DWC3_GEVNTCOUNT(0),4096);eventOffset=0;usbCount(3);
+  IOLog("PongUSB: event ring overrun %u; retired without dropping the stack\n",count);return;
+ }
  for(unsigned done=0;done<count;done+=4) {
   auto event=dma.r(eventOffset);eventOffset=(eventOffset+4)&4095;
   if(!(event&1))epEvent(event);
   else switch((event>>8)&15) {
-   case 0:disconnect();break;
+   case 0:disconnect();cableConnected=false;usbCount(6);break;
    case 1:core.w(DWC3_DCFG,core.r(DWC3_DCFG)&~(127u<<3));resetEndpoints();break;
-   case 2:packet=DWC3_DSTS_CONNECTSPD(core.r(DWC3_DSTS))==0?512:64;
-    config[57]=config[64]=uint8_t(packet);config[58]=config[65]=uint8_t(packet>>8);break;
+   case 2:{
+    // CONNECTSPD is a speed code, not a packet size. 0 means "no connection
+    // established yet" and 4 or above is SuperSpeed, so treating 0 as 512
+    // advertised a 512-byte endpoint on a High-Speed link, which no host will
+    // enumerate. Keep High-Speed sizing until the core reports SuperSpeed.
+    const unsigned speed=DWC3_DSTS_CONNECTSPD(core.r(DWC3_DSTS));
+    packet=speed>=4?512:64;
+    config[57]=config[64]=uint8_t(packet);config[58]=config[65]=uint8_t(packet>>8);break;}
    default:break;
   }
  }
- if(count)core.w(DWC3_GEVNTCOUNT(0),count);
+ if(count){core.w(DWC3_GEVNTCOUNT(0),count);usbCount(8);}
+ // Cheap enough at the worker's 2 ms cadence, and the only live view a host
+ // gets when the console is the thing that broke.
+ usbStat(6,int32_t(core.r(DWC3_DSTS)));usbStat(7,int32_t(qscratch.r(0x10)));
 }
 static void console() {
- if(!configured || !dtr)return;
+ if(!configured)return;
+ if(!dtr) {
+  // DTR is the standard CDC handshake, but a host that opens the port without
+  // raising it would otherwise never receive a byte from this transport.
+  // After a short grace period the log matters more than the convention.
+  if(phyNow()-configuredAt<kDtrGraceMs)return;
+ }
  if(!rxActive)rxActive=transfer(2,RxTrb,RxData,packet,DWC3_TRBCTL_NORMAL);
  if(txActive || !log.p || log.r(0)!=0x43474244)return;
  constexpr uint32_t capacity=0x200000-12;
@@ -282,6 +361,7 @@ static void console() {
  auto source=(volatile uint8_t *)log.p+12;auto target=bytes(TxData);
  for(unsigned i=0;i<length;i++)target[i]=source[(logCursor+i)%capacity];
  txEnd=(logCursor+length)%capacity;txActive=transfer(3,TxTrb,TxData,length,DWC3_TRBCTL_NORMAL);
+ if(txActive)usbStat(10,native_usb_stats[10]+int32_t(length));
 }
 static void mux() {
  if(!muxEnabled||!configured)return;
@@ -292,14 +372,17 @@ static void mux() {
  if(n){muxTxBytes=n;muxTxActive=transfer(7,MuxTxTrb,MuxTxData,n,DWC3_TRBCTL_NORMAL);}
 }
 static bool initialize() {
+ usbStat(0,UsbStageInit);
  // Firmware clocks surviving Fastboot do not prove the eUSB2/repeater/NOC
  // fabric or DMA ownership survived. An MMIO load on a gated interconnect
  // cannot be bounded by a software polling timeout. Require explicit board
  // handoff BEFORE the first controller read or shared-SMMU write.
  bool firmwarePhy=false;
  if(!PongLowDma::usbHandoff(&firmwarePhy) || !PongLowDma::usbAddress(physical)) {
-  IOLog("PongUSB: independent UEFI USB DMA/controller handoff absent; no hardware takeover\n");return false;
+  IOLog("PongUSB: independent UEFI USB DMA/controller handoff absent; no hardware takeover\n");
+  usbFatal(-1);return false;
  }
+ usbStat(13,firmwarePhy?1:0);
  // Firmware certifies DMA quiescence independently. Establish the actual
  // Pong board PHY here when the loader did not retain it; no fabricated bit.
  if(!firmwarePhy && !prepareBoardPhy())return false;
@@ -332,67 +415,133 @@ static bool initialize() {
  muxEnabled=enableMux==1&&pong_usb_mux_publish();
  iphoneIdentity=muxEnabled&&enablePhone==1;
  if(muxEnabled){device[4]=0;device[8]=0xac;device[9]=5;device[10]=0xa8;device[11]=0x12;}
- bridgeStarted=mach_absolute_time();
+ bridgeStarted=mach_absolute_time();sessionStartMs=phyNow();
  resetEndpoints();if(failed)return false;
  core.w(DWC3_DEVTEN,0xf);log.open(0x85200000,0x200000);
+ usbStat(11,log.p?1:0);usbStat(14,muxEnabled?1:0);
  // Pong uses an external PMIC/Type-C session detector. RUN_STOP without
  // the Qualcomm glue's VBUS override starts the core but never attaches.
  // Wait for a real PMIC cable report in the worker before asserting it.
  core.w(DWC3_GCTL,core.r(DWC3_GCTL)|DWC3_GCTL_DSBLCLKGTNG);
  IOLog("PongUSB: DWC3 prepared id=%x SID0 DMA=%llx; waiting for real PMIC USB session\n",core.r(DWC3_GSNPSID),physical);return true;
 }
+static bool sessionVote(bool on) {
+ const unsigned hs=(1u<<20)|(1u<<28),ss=1u<<24;
+ if(on) {
+  // dwc3-qcom.c vbus_override: the vote only lets the core run. Whether a
+  // host is attached still comes from the PHY's own line state below.
+  qscratch.w(0x30,qscratch.r(0x30)|ss);qscratch.w(0x10,qscratch.r(0x10)|hs);
+  if((qscratch.r(0x10)&hs)!=hs)return false;
+  core.w(DWC3_DCTL,core.r(DWC3_DCTL)|DWC3_DCTL_RUN_STOP);
+  return true;
+ }
+ core.w(DWC3_DCTL,core.r(DWC3_DCTL)&~DWC3_DCTL_RUN_STOP);
+ const bool halted=wait(DWC3_DSTS,DWC3_DSTS_DEVCTRLHLT,DWC3_DSTS_DEVCTRLHLT,250);
+ qscratch.w(0x10,qscratch.r(0x10)&~hs);qscratch.w(0x30,qscratch.r(0x30)&~ss);
+ return halted;
+}
+// The charger report arrives over PMIC GLINK, which needs the audio DSP. When
+// that is off or late, gating the port on it means the cable is never noticed
+// and the only debug transport stays dark. Fall back to the controller's own
+// connection state once the manager has been silent long enough: a vote
+// without a host reports no speed, so this cannot invent a cable.
+static int probeSession() {
+ usbCount(2);
+ if(!sessionVote(true))return -1;
+ const uint64_t end=phyNow()+kSessionProbeMs;
+ do {
+  if(DWC3_DSTS_CONNECTSPD(core.r(DWC3_DSTS)))return 1;
+  IOSleep(5);
+ } while(phyNow()<end);
+ sessionVote(false);
+ return 0;
+}
 static void cableSession() {
- const int online=pong_battery_usb_online();if(online<0 || bool(online)==cableConnected)return;
+ const int reported=pong_battery_usb_online();
+ usbStat(1,reported);
+ // While the manager has a reading it is authoritative: it also covers a
+ // charger-side suspend, which the controller reports as a plain disconnect.
+ // Never probe while the port is up: a manager that dies mid-session must not
+ // tear down a link the host is already using. Disconnection belongs to the
+ // controller's own disconnect event below.
+ const bool silent=reported<0&&!cableConnected&&
+                   phyNow()-sessionStartMs>=kSessionFallbackMs&&
+                   phyNow()-lastProbeMs>=kProbeIntervalMs;
+ int online=reported>=0?reported:-1;
+ if(silent){lastProbeMs=phyNow();online=probeSession();}
+ if(online<0 || bool(online)==cableConnected)return;
  if(online&&muxEnabled&&!pong_usb_mux_bridge_ready()) {
   // Host usbmux has a finite VERSION deadline. Do not enumerate a Mux
   // function before its real service bridge can consume that request.
   uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time()-bridgeStarted,&ns);
   if(ns<60000000000ULL)return;
-  muxEnabled=iphoneIdentity=false;device[4]=2;device[8]=device[9]=0xff;device[10]=0x28;device[11]=1;
+  muxEnabled=iphoneIdentity=false;usbStat(14,0);device[4]=2;device[8]=device[9]=0xff;device[10]=0x28;device[11]=1;
   resetEndpoints();IOLog("PongUSB: native bridge unavailable after 60s; real CDC console retained\n");
  }
- const unsigned hs=(1u<<20)|(1u<<28),ss=1u<<24;
  if(online) {
-  // dwc3-qcom.c vbus_override: external session valid from the board's
-  // actual PMIC, not a fabricated charger reading or a permanent VBUS bit.
-  qscratch.w(0x30,qscratch.r(0x30)|ss);qscratch.w(0x10,qscratch.r(0x10)|hs);
-  if((qscratch.r(0x10)&hs)!=hs){failed=true;IOLog("PongUSB: QSCRATCH session vote did not latch\n");return;}
+  if(!sessionVote(true)) {
+   // A vote that will not latch is a power-domain symptom, not a dead port.
+   // Retry on the next pass; retiring here is what made replugging mandatory.
+   usbCount(3);IOLog("PongUSB: QSCRATCH session vote did not latch\n");return;
+  }
   if(muxEnabled)pong_usb_mux_attached(true);
-  core.w(DWC3_DCTL,core.r(DWC3_DCTL)|DWC3_DCTL_RUN_STOP);cableConnected=true;
+  cableConnected=true;usbCount(4);
  } else {
-  core.w(DWC3_DCTL,core.r(DWC3_DCTL)&~DWC3_DCTL_RUN_STOP);
-  if(!wait(DWC3_DSTS,DWC3_DSTS_DEVCTRLHLT,DWC3_DSTS_DEVCTRLHLT,250)){failed=true;return;}
-  qscratch.w(0x10,qscratch.r(0x10)&~hs);qscratch.w(0x30,qscratch.r(0x30)&~ss);
+  if(!sessionVote(false))usbCount(3);
   cableConnected=false;disconnect();
   if(muxEnabled)pong_usb_mux_attached(false);
   // Retain DMA and endpoint resources while halted. The host's next real
   // USB reset reinitializes EP0 before any payload TRB is reused.
  }
- IOLog("PongUSB: real PMIC session=%u QSCRATCH=%x DSTS=%x\n",unsigned(cableConnected),qscratch.r(0x10),core.r(DWC3_DSTS));
+ IOLog("PongUSB: session=%u source=%s QSCRATCH=%x DSTS=%x\n",unsigned(cableConnected),
+       reported>=0?"pmic":"controller",qscratch.r(0x10),core.r(DWC3_DSTS));
+}
+static void report(const char *reason) {
+ IOLog("PongUSB: %s; stage=%d fault=%d session=%d publish=%d probe=%d rx=%d tx=%d ring=%d DSTS=%x QC=%x\n",
+       reason,int(native_usb_stats[0]),int(native_usb_stats[3]),int(native_usb_stats[4]),
+       int(native_usb_stats[5]),int(native_usb_stats[2]),int(native_usb_stats[9]),
+       int(native_usb_stats[10]),int(native_usb_stats[11]),
+       unsigned(native_usb_stats[6]),unsigned(native_usb_stats[7]));
 }
 static void worker(void *,wait_result_t) {
  // Root storage must have finished its exact SID/bank migration before
  // optional USB touches either the shared SMMU or the inherited controller.
  // Sleep only this worker; a failed/missing root never blocks boot here.
+ usbStat(0,UsbStageUfsWait);
  IOLog("PongUSB: waiting for root transport before controller/SID0 takeover\n");
  for(unsigned i=0;i<180&&!pong_ufs_ready();i++)IOSleep(500);
  if(!pong_ufs_ready()) {
   IOLog("PongUSB: root transport unavailable; skip optional USB takeover\n");
+  usbFatal(1);report("no root transport");
   thread_terminate(current_thread());thread_block(THREAD_CONTINUE_NULL);return;
  }
  IOLog("PongUSB: root transport ready; starting independent USB DMA\n");
  if(initialize()) {
-  while(!failed){cableSession();if(cableConnected){events();console();mux();}IOSleep(configured?2:10);}
+  while(!failed&&__atomic_load_n(&native_usb_stats[3],__ATOMIC_ACQUIRE)<int32_t(kMaxSoftFaults)) {
+   cableSession();
+   usbStat(0,configured?UsbStageConfigured:UsbStageSession);
+   if(cableConnected){events();console();mux();}
+   IOSleep(configured?2:10);
+  }
   core.w(DWC3_DCTL,core.r(DWC3_DCTL)&~DWC3_DCTL_RUN_STOP);
   // Retain DMA/lease if retirement is unknown. Never reuse active pages.
-  IOLog("PongUSB: controller failed, output stopped; DMA retained\n");
- } else IOLog("PongUSB: initialization unavailable; continue normal boot\n");
+  if(!failed)usbFatal(-2);
+  report("controller stopped");
+ } else {report("initialization unavailable; normal boot continues");}
  thread_terminate(current_thread());thread_block(THREAD_CONTINUE_NULL);
 }
 static void start() {
- unsigned enabled=0;if(!PE_parse_boot_argn("pong_usb",&enabled,sizeof(enabled)) || enabled!=1)return;
+ unsigned enabled=0;
+ if(!PE_parse_boot_argn("pong_usb",&enabled,sizeof(enabled)) || enabled!=1) {
+  // Silence here is indistinguishable from a takeover that failed later.
+  IOLog("PongUSB: pong_usb=1 absent; the port stays with the loader\n");return;
+ }
  static uint32_t started;
  if(__atomic_exchange_n(&started,1,__ATOMIC_ACQ_REL))return;
- thread_t t=nullptr;if(kernel_thread_start(worker,nullptr,&t)==KERN_SUCCESS)thread_deallocate(t);
+ thread_t t=nullptr;
+ if(kernel_thread_start(worker,nullptr,&t)!=KERN_SUCCESS) {
+  IOLog("PongUSB: worker thread refused; no device-mode takeover\n");return;
+ }
+ thread_deallocate(t);
 }
 } // namespace PongUsb
