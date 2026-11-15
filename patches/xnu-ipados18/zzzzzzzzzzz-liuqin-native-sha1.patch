@@ -1,0 +1,268 @@
+diff --git a/libkern/crypto/corecrypto_sha1.c b/libkern/crypto/corecrypto_sha1.c
+--- a/libkern/crypto/corecrypto_sha1.c
++++ b/libkern/crypto/corecrypto_sha1.c
+@@ -1,109 +1,155 @@
+-#include <libkern/crypto/crypto_internal.h>
+-#include <libkern/crypto/sha1.h>
+-#include <kern/debug.h>
+-#include <corecrypto/ccdigest.h>
+-
+-
+-static uint64_t
+-getCount(SHA1_CTX *ctx)
+-{
+-	return ctx->c.b64[0];
+-}
+-
+-static void
+-setCount(SHA1_CTX *ctx, uint64_t count)
+-{
+-	ctx->c.b64[0] = count;
+-}
+-
+-/* Copy a ccdigest ctx into a legacy SHA1 context */
+-static void
+-DiToSHA1(const struct ccdigest_info *di, struct ccdigest_ctx *di_ctx, SHA1_CTX *sha1_ctx)
+-{
+-	setCount(sha1_ctx, ccdigest_nbits(di, di_ctx) / 8 + ccdigest_num(di, di_ctx));
+-	memcpy(sha1_ctx->m.b8, ccdigest_data(di, di_ctx), di->block_size);
+-	memcpy(sha1_ctx->h.b8, ccdigest_state_ccn(di, di_ctx), di->state_size);
+-}
+-
+-/* Copy a legacy SHA1 context into a ccdigest ctx  */
+-static void
+-SHA1ToDi(const struct ccdigest_info *di, SHA1_CTX *sha1_ctx, struct ccdigest_ctx *di_ctx)
+-{
+-	uint64_t count = getCount(sha1_ctx);
+-
+-	ccdigest_num(di, di_ctx) = (unsigned)(count % di->block_size);
+-	ccdigest_nbits(di, di_ctx) = (count - ccdigest_num(di, di_ctx)) * 8;
+-	memcpy(ccdigest_data(di, di_ctx), sha1_ctx->m.b8, di->block_size);
+-	memcpy(ccdigest_state_ccn(di, di_ctx), sha1_ctx->h.b8, di->state_size);
+-}
+-
+-void
+-SHA1Init(SHA1_CTX *ctx)
+-{
+-	const struct ccdigest_info *di = g_crypto_funcs->ccsha1_di;
+-	ccdigest_di_decl(di, di_ctx);
+-
+-	g_crypto_funcs->ccdigest_init_fn(di, di_ctx);
+-
+-	DiToSHA1(di, di_ctx, ctx);
+-}
+-
+-void
+-SHA1Update(SHA1_CTX *ctx, const void *data, size_t len)
+-{
+-	const struct ccdigest_info *di = g_crypto_funcs->ccsha1_di;
+-	ccdigest_di_decl(di, di_ctx);
+-
+-	SHA1ToDi(di, ctx, di_ctx);
+-	g_crypto_funcs->ccdigest_update_fn(di, di_ctx, len, data);
+-	DiToSHA1(di, di_ctx, ctx);
+-}
+-
+-void
+-SHA1Final(void *digest, SHA1_CTX *ctx)
+-{
+-	const struct ccdigest_info *di = g_crypto_funcs->ccsha1_di;
+-	ccdigest_di_decl(di, di_ctx);
+-
+-	SHA1ToDi(di, ctx, di_ctx);
+-	ccdigest_final(di, di_ctx, digest);
+-}
+-
+-/* This is not publicised in header, but exported in libkern.exports */
+-void SHA1Final_r(SHA1_CTX *context, void *digest);
+-void
+-SHA1Final_r(SHA1_CTX *context, void *digest)
+-{
+-	SHA1Final(digest, context);
+-}
+-
+-
+-/*
+- * This function is called by the SHA1 hardware kext during its init.
+- * This will register the function to call to perform SHA1 using hardware.
+- */
+-#include <sys/types.h>
+-#include <libkern/OSAtomic.h>
+-#include <sys/systm.h>
+-
+-typedef kern_return_t (*InKernelPerformSHA1Func)(void *ref, const void *data, size_t dataLen, u_int32_t *inHash, u_int32_t options, u_int32_t *outHash, Boolean usePhysicalAddress);
+-void sha1_hardware_hook(Boolean option, InKernelPerformSHA1Func func, void *ref);
+-static void *SHA1Ref;
+-static InKernelPerformSHA1Func performSHA1WithinKernelOnly;
+-
+-void
+-sha1_hardware_hook(Boolean option, InKernelPerformSHA1Func func, void *ref)
+-{
+-	if (option) {
+-		// Establish the hook. The hardware is ready.
+-		OSCompareAndSwapPtr((void*)NULL, (void*)ref, (void * volatile*)&SHA1Ref);
+-
+-		if (!OSCompareAndSwapPtr((void *)NULL, (void *)func, (void * volatile *)&performSHA1WithinKernelOnly)) {
+-			panic("sha1_hardware_hook: Called twice.. Should never happen");
+-		}
+-	} else {
+-		// The hardware is going away. Tear down the hook.
+-		performSHA1WithinKernelOnly = NULL;
+-		SHA1Ref = NULL;
+-	}
+-}
++/*
++ * Pong/liuqin port: self-contained SHA-1.
++ *
++ * Upstream this file is a thin dispatcher: every entry point reads
++ * g_crypto_funcs->ccsha1_di and calls g_crypto_funcs->ccdigest_*.  That table is
++ * registered by com.apple.kec.corecrypto on shipping hardware.  This kernel is
++ * statically linked and never loads that kext, so g_crypto_funcs stays NULL and
++ * the first SHA-1 user faults:
++ *
++ *   panic(cpu 0 caller 0xfffffff00868e910): Kernel data abort
++ *     at pc 0xfffffff0084c6790, lr 0xfffffff008535b94
++ *     esr: 0x96000005  far: 0x28
++ *   0xfffffff0084c6790: ldr x20, [x22, #0x28]   ; g_crypto_funcs->ccsha1_di
++ *   caller: IOPlatformExpertDevice::generatePlatformUUID()
++ *           hashing /chosen's unique-chip-id + chip-id
++ *
++ * so SHA-1 is implemented here directly.  The digest is bit-identical to the
++ * corecrypto one, which keeps IOPlatformUUID stable across builds.
++ */
++#include <libkern/crypto/sha1.h>
++#include <sys/types.h>
++#include <string.h>
++
++#define PONG_SHA1_BLOCK 64
++
++static inline uint32_t
++pong_rol32(uint32_t value, unsigned int bits)
++{
++	return (value << bits) | (value >> (32 - bits));
++}
++
++static void
++pong_sha1_compress(uint32_t state[5], const uint8_t block[PONG_SHA1_BLOCK])
++{
++	uint32_t w[80];
++	uint32_t a, b, c, d, e;
++	int i;
++
++	for (i = 0; i < 16; i++) {
++		w[i] = ((uint32_t)block[i * 4] << 24) |
++		    ((uint32_t)block[i * 4 + 1] << 16) |
++		    ((uint32_t)block[i * 4 + 2] << 8) |
++		    (uint32_t)block[i * 4 + 3];
++	}
++	for (i = 16; i < 80; i++) {
++		w[i] = pong_rol32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
++	}
++
++	a = state[0];
++	b = state[1];
++	c = state[2];
++	d = state[3];
++	e = state[4];
++
++	for (i = 0; i < 80; i++) {
++		uint32_t f, k, t;
++
++		if (i < 20) {
++			f = (b & c) | (~b & d);
++			k = 0x5a827999U;
++		} else if (i < 40) {
++			f = b ^ c ^ d;
++			k = 0x6ed9eba1U;
++		} else if (i < 60) {
++			f = (b & c) | (b & d) | (c & d);
++			k = 0x8f1bbcdcU;
++		} else {
++			f = b ^ c ^ d;
++			k = 0xca62c1d6U;
++		}
++		t = pong_rol32(a, 5) + f + e + k + w[i];
++		e = d;
++		d = c;
++		c = pong_rol32(b, 30);
++		b = a;
++		a = t;
++	}
++
++	state[0] += a;
++	state[1] += b;
++	state[2] += c;
++	state[3] += d;
++	state[4] += e;
++}
++
++void
++SHA1Init(SHA1_CTX *ctx)
++{
++	ctx->h.b32[0] = 0x67452301U;
++	ctx->h.b32[1] = 0xefcdab89U;
++	ctx->h.b32[2] = 0x98badcfeU;
++	ctx->h.b32[3] = 0x10325476U;
++	ctx->h.b32[4] = 0xc3d2e1f0U;
++	ctx->c.b64[0] = 0;              /* bit count, as the header documents */
++	memset(ctx->m.b8, 0, PONG_SHA1_BLOCK);
++	ctx->count = 0;
++}
++
++void
++SHA1Update(SHA1_CTX *ctx, const void *data, size_t len)
++{
++	const uint8_t *input = (const uint8_t *)data;
++	size_t used = (size_t)((ctx->c.b64[0] >> 3) % PONG_SHA1_BLOCK);
++
++	ctx->c.b64[0] += (uint64_t)len << 3;
++
++	while (len > 0) {
++		size_t room = PONG_SHA1_BLOCK - used;
++		size_t take = (len < room) ? len : room;
++
++		memcpy(ctx->m.b8 + used, input, take);
++		used += take;
++		input += take;
++		len -= take;
++
++		if (used == PONG_SHA1_BLOCK) {
++			pong_sha1_compress(ctx->h.b32, ctx->m.b8);
++			used = 0;
++		}
++	}
++}
++
++void
++SHA1Final(void *digest, SHA1_CTX *ctx)
++{
++	uint64_t bits = ctx->c.b64[0];
++	size_t used = (size_t)((bits >> 3) % PONG_SHA1_BLOCK);
++	uint8_t *out = (uint8_t *)digest;
++	int i;
++
++	ctx->m.b8[used++] = 0x80;
++
++	if (used > PONG_SHA1_BLOCK - 8) {
++		memset(ctx->m.b8 + used, 0, PONG_SHA1_BLOCK - used);
++		pong_sha1_compress(ctx->h.b32, ctx->m.b8);
++		used = 0;
++	}
++	memset(ctx->m.b8 + used, 0, PONG_SHA1_BLOCK - 8 - used);
++	for (i = 0; i < 8; i++) {
++		ctx->m.b8[PONG_SHA1_BLOCK - 8 + i] = (uint8_t)(bits >> (56 - 8 * i));
++	}
++	pong_sha1_compress(ctx->h.b32, ctx->m.b8);
++
++	for (i = 0; i < SHA1_RESULTLEN; i++) {
++		out[i] = (uint8_t)(ctx->h.b32[i >> 2] >> (24 - 8 * (i & 3)));
++	}
++}
++
++/* This is not publicised in header, but exported in libkern.exports */
++void SHA1Final_r(SHA1_CTX *context, void *digest);
++void
++SHA1Final_r(SHA1_CTX *context, void *digest)
++{
++	SHA1Final(digest, context);
++}
