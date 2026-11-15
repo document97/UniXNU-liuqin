@@ -1,0 +1,99 @@
+diff --git a/osfmk/prng/prng_random.c b/osfmk/prng/prng_random.c
+--- a/osfmk/prng/prng_random.c
++++ b/osfmk/prng/prng_random.c
+@@ -242,6 +242,14 @@ bootseed_init(void)
+ 
+ #define EARLY_RANDOM_STATE_STATIC_SIZE (264)
+ 
++/*
++ * Set by early_random_init().  Stock XNU keeps this in a function-local static
++ * inside early_random(), but read_erandom_generate() needs the same answer:
++ * nothing in this kernel calls register_and_init_prng(), so the early DRBG is
++ * the only generator there is and has to seed itself on first use.
++ */
++static int erandom_ready;
++
+ static struct {
+ 	uint8_t drbg_state[EARLY_RANDOM_STATE_STATIC_SIZE];
+ 	struct ccdrbg_info drbg_info;
+@@ -278,6 +286,7 @@ early_random_init(void)
+ 
+ 	cc_clear(sizeof(nonce), &nonce);
+ 	cc_clear(sizeof(earlyseed), earlyseed);
++	erandom_ready = 1;
+ }
+ 
+ static void read_erandom(void * buf, size_t nbytes);
+@@ -322,11 +331,9 @@ uint64_t
+ early_random(void)
+ {
+ 	uint64_t result;
+-	static int init = 0;
+ 
+-	if (__improbable(init == 0)) {
++	if (__improbable(!erandom_ready)) {
+ 		early_random_init();
+-		init = 1;
+ 	}
+ 
+ 	read_erandom(&result, sizeof(result));
+@@ -347,6 +354,14 @@ read_erandom_generate(void * buf, size_t nbytes)
+ 	size_t n;
+ 	int rc;
+ 
++	/*
++	 * The first caller can be read_random() or read_frandom() rather than
++	 * early_random(), so seed the DRBG here instead of assuming it is up.
++	 */
++	if (__improbable(!erandom_ready)) {
++		early_random_init();
++	}
++
+ 	// The DBRG request size is limited, so we break the request into
+ 	// chunks.
+ 	while (nbytes > 0) {
+@@ -410,7 +425,12 @@ random_cpu_init(int cpu)
+ 	assert3s(cpu, !=, master_cpu);
+ 
+ 	if (!prng_ready) {
+-		panic("random_cpu_init: kernel prng has not been installed");
++		/*
++		 * No kernel PRNG is installed in this port.  A secondary CPU
++		 * coming up does not need one, and panicking here would stop the
++		 * machine for a condition that is permanent by construction.
++		 */
++		return;
+ 	}
+ 
+ 	prng_funcs.initgen(prng_ctx, cpu);
+@@ -420,6 +440,18 @@ random_cpu_init(int cpu)
+ void
+ read_random(void * buffer, u_int numbytes)
+ {
++	if (__improbable(!prng_ready)) {
++		/*
++		 * Nothing in this kernel calls register_and_init_prng(): the
++		 * corecrypto kext that normally does is not part of the port, so
++		 * prng_funcs is still a table of NULLs and the refresh call below
++		 * branches to address 0.  Serve the request from the early
++		 * HMAC-SHA256 DRBG, which is what read_frandom() already returns
++		 * at this stage of boot.
++		 */
++		read_erandom_generate(buffer, numbytes);
++		return;
++	}
+ 	prng_funcs.refresh(prng_ctx);
+ 	read_random_generate(buffer, numbytes);
+ }
+@@ -465,6 +497,11 @@ write_random(void * buffer, u_int numbytes)
+ 	uint8_t seed[SHA256_DIGEST_LENGTH];
+ 	SHA256_CTX ctx;
+ 
++	if (__improbable(!prng_ready)) {
++		/* There is no kernel PRNG to reseed; drop the sample. */
++		return 0;
++	}
++
+ 	/* hash the input to minimize the time we need to hold the lock */
+ 	SHA256_Init(&ctx);
+ 	SHA256_Update(&ctx, buffer, numbytes);
