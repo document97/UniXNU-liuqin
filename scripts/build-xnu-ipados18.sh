@@ -231,6 +231,21 @@ for header in Path('refer/libdispatch/os').glob('*.h'):
     if not target.exists() or target.read_bytes() != result.stdout:
         target.write_bytes(result.stdout)
 PY
+# Compiler wrapper for the XNU makefiles, and only for them. makedefs/MakeInc.cmd
+# rewrites a default-origin CC to an absolute path from xcrun, so a wrapper has
+# to arrive as a make variable. Putting it in the environment instead also
+# reaches the UEFI BaseTools host build, where a raw toolchain clang - no xcrun
+# stub, therefore no macOS sysroot - cannot even find stdlib.h.
+XNU_MAKE_CC=()
+if [ -n "${XNU_CC:-}" ]; then
+  XNU_MAKE_CC+=("CC=$XNU_CC")
+fi
+if [ -n "${XNU_CXX:-}" ]; then
+  XNU_MAKE_CC+=("CXX=$XNU_CXX")
+fi
+if [ "${#XNU_MAKE_CC[@]}" != 0 ]; then
+  echo "== kernel: compiling with ${XNU_MAKE_CC[*]}"
+fi
 if [ ! -f "$KERNEL_SDKROOT/.xnu-$XNU_VERSION-headers" ] || \
    [ .cache/xnu-work/pexpert/pexpert/arm64/board_config.h -nt "$KERNEL_SDKROOT/.xnu-$XNU_VERSION-headers" ] || \
    [ .cache/xnu-work/pexpert/pexpert/arm64/PONG.h -nt "$KERNEL_SDKROOT/.xnu-$XNU_VERSION-headers" ]; then
@@ -238,6 +253,7 @@ if [ ! -f "$KERNEL_SDKROOT/.xnu-$XNU_VERSION-headers" ] || \
     MACHINE_CONFIGS=PONG KERNEL_CONFIGS=DEVELOPMENT \
     RC_DARWIN_KERNEL_VERSION="$XNU_DARWIN" RC_ProjectSourceVersion="$XNU_VERSION" \
     MAKEJOBS=-j"${JOBS:-4}" OBJROOT="$ROOT/build/xnu/obj" \
+    ${XNU_MAKE_CC[@]+"${XNU_MAKE_CC[@]}"} \
     SYMROOT="$ROOT/build/xnu/sym" DSTROOT="$KERNEL_SDKROOT"
   touch "$KERNEL_SDKROOT/.xnu-$XNU_VERSION-headers"
 fi
@@ -1109,6 +1125,7 @@ make -C .cache/xnu-work "${XNU_BUILD_TARGET:-build}" SDKROOT="${XNU_SDKROOT:-iph
   RC_DARWIN_KERNEL_VERSION="$XNU_DARWIN" RC_ProjectSourceVersion="$XNU_VERSION" \
   BUILD_LTO=0 BUILD_STATIC_LINK=0 BUILD_DSYM="${XNU_BUILD_DSYM:-0}" BOUND_CHECKS=0 BUILD_WERROR="${XNU_BUILD_WERROR:-0}" MAKEJOBS=-j"${JOBS:-4}" \
   RC_NONARCH_CFLAGS="$EXTRA_CFLAGS" "${EXTRA_MAKE_ARGS[@]}" \
+  ${XNU_MAKE_CC[@]+"${XNU_MAKE_CC[@]}"} \
   OBJROOT="$ROOT/build/xnu/ios-obj" SYMROOT="$ROOT/build/xnu/ios-sym" DSTROOT="$ROOT/build/xnu/ios-dst"
 if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ] && [ "$CRYPTO_BOOTSTRAP_MODE" = source ]; then
   python3 scripts/seal-source-crypto-kernel.py \

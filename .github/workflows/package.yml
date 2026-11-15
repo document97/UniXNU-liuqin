@@ -685,8 +685,13 @@ jobs:
             chmod +x "${wrap}/${name}"
           done
           {
-            printf 'CC=%s/clang\n' "${wrap}"
-            printf 'CXX=%s/clang++\n' "${wrap}"
+            # XNU_CC/XNU_CXX, not CC/CXX: the kernel script forwards them as make
+            # variables for .cache/xnu-work only. A global CC also reaches the
+            # UEFI BaseTools host build, whose plain "cc" needs the system xcrun
+            # stub to find the macOS sysroot - run 43738729890 lost the kernel to
+            # "stdlib.h file not found" after building it successfully.
+            printf 'XNU_CC=%s/clang\n' "${wrap}"
+            printf 'XNU_CXX=%s/clang++\n' "${wrap}"
             printf 'CCACHE_BASEDIR=%s\n' "$GITHUB_WORKSPACE"
             printf 'CCACHE_NOHASHDIR=true\n'
             # Default compiler check is mtime+size; a restored cache and a fresh
@@ -699,6 +704,11 @@ jobs:
             # to survive long enough to be restored.
             printf 'CCACHE_MAXSIZE=4G\n'
             printf 'CCACHE_UMASK=002\n'
+            # Run 43738729890 counted 775 misses and still left the cache at
+            # 0.48% of its limit, so something rejects the results. ccache's own
+            # decision for every call goes to this file; the statistics step
+            # summarises it instead of guessing from the size again.
+            printf 'CCACHE_LOGFILE=%s\n' "${RUNNER_TEMP}/ccache.log"
           } >> "$GITHUB_ENV"
           echo "ccache: $("${ccache_bin}" --version | head -1)"
           echo "compiler: ${real_cc} ($("${real_cc}" --version | head -1))"
@@ -773,6 +783,17 @@ jobs:
           calls="$(ccache --show-stats | awk '/^Cacheable calls:/ {print $3; exit}')"
           echo "cacheable calls: ${calls:-unknown}"
           echo "cache size: $(du -sh "${CCACHE_DIR}" 2>/dev/null | cut -f1 || echo none)"
+          log="${RUNNER_TEMP}/ccache.log"
+          if [ -f "$log" ]; then
+            echo "ccache decisions:"
+            grep -o 'Result: [a-z_]*' "$log" | sort | uniq -c | sort -rn | head -8 || true
+            stored="$(grep -c 'Result: stored' "$log" || true)"
+            echo "results stored: ${stored:-0}"
+            if [ "${stored:-0}" = "0" ]; then
+              echo "::warning::ccache stored nothing this run; the next build will compile from scratch again"
+              grep -oE '(Could not|Failed to|disable|read-only)[^\n]{0,120}' "$log" | sort | uniq -c | sort -rn | head -5 || true
+            fi
+          fi
           if [ "${calls:-0}" = "0" ]; then
             echo "::warning::ccache saw no compiles: CC did not reach ccache, so the cache cannot help"
           fi
