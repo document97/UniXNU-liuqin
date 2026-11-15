@@ -103,6 +103,9 @@ env:
   # The Homebrew kegs the Tier 3 Intel runner has but does not link.
   LLVM_KEG: /usr/local/opt/llvm@18
   LLD_KEG: /usr/local/opt/lld
+  # Outside the workspace: the boot job restores it from the actions cache, and
+  # nothing under device/ should ever see a stray compiler cache.
+  CCACHE_DIR: /Users/runner/ccache
 
 jobs:
   userdata:
@@ -624,6 +627,48 @@ jobs:
             printf 'PONG_WIFI_SOURCE=%s\n' "$PONG_WIFI_SOURCE"
             printf 'PONG_WIFI_FIRMWARE=%s\n' "${RUNNER_TEMP}/liuqin-wifi/qca6490"
           } >> "$GITHUB_ENV"
+      # The kernel is 913 translation units and a fresh runner starts with an
+      # empty build tree, so before this a one-file patch cost the same ~29
+      # minutes as a full build. ccache keys on the preprocessed source, so a
+      # rebuild after a patch reuses every object the patch did not touch.
+      #
+      # The key carries github.run_id, which makes the exact key always miss:
+      # actions/cache cannot update an entry, so the rolling key plus a prefix
+      # in restore-keys is what makes the cache advance from run to run.
+      - name: ccache cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ env.UNIXNU_REF }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ env.UNIXNU_REF }}-
+      - name: ccache toolchain
+        run: |
+          set -euo pipefail
+          export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+          command -v ccache >/dev/null || brew install ccache
+          # The kit recipe does not set CC, so the Makefiles resolve "clang" by
+          # name: a shim directory in front of PATH routes every compile through
+          # ccache. CCACHE_PATH must not contain the shim itself or ccache would
+          # find itself as the compiler.
+          shim="${RUNNER_TEMP}/ccache-shim"
+          mkdir -p "$shim"
+          for t in clang clang++ cc c++; do ln -sf "$(command -v ccache)" "$shim/$t"; done
+          {
+            printf 'PATH=%s:%s\n' "$shim" "$PATH"
+            printf 'CCACHE_PATH=%s\n' "${LLVM_KEG}/bin:/usr/bin:/bin"
+            printf 'CCACHE_BASEDIR=%s\n' "$GITHUB_WORKSPACE"
+            printf 'CCACHE_NOHASHDIR=true\n'
+            # Default compiler check is mtime+size; a restored cache and a fresh
+            # checkout both change mtime, which would invalidate everything.
+            printf 'CCACHE_COMPILERCHECK=content\n'
+            printf 'CCACHE_SLOPPINESS=time_macros,include_file_ctime,include_file_mtime,file_stat_matches\n'
+            printf 'CCACHE_MAXSIZE=2G\n'
+            printf 'CCACHE_UMASK=002\n'
+          } >> "$GITHUB_ENV"
+          ccache --version | head -1
+          echo "ccache dir: ${CCACHE_DIR} ($(du -sh "${CCACHE_DIR}" 2>/dev/null | cut -f1 || echo empty))"
+          sysctl -n hw.ncpu
       - name: package
         working-directory: device
         env:
@@ -635,7 +680,11 @@ jobs:
           UNIXNU_SHARED_XNU_BUILD: '0'
         run: |
           set -euo pipefail
-          args=(--os "${OS_PROFILE}" --uefi ../uefi-liuqin -j 3 --unique-chip-id "${UNIXNU_UNIQUE_CHIP_ID}")
+          # macos-15-intel has 4 vCPUs; -j 3 left one of them idle for the whole
+          # compile. Ask the machine instead of guessing, and say so in the log.
+          jobs="$(sysctl -n hw.ncpu)"
+          echo "make -j${jobs}"
+          args=(--os "${OS_PROFILE}" --uefi ../uefi-liuqin -j "${jobs}" --unique-chip-id "${UNIXNU_UNIQUE_CHIP_ID}")
           # Without an original kernelcache the kernel step stages the native
           # build as kernel.macho, which is the bootable one. With prelink it
           # prelinks the extracted 22H374 kernelcache instead.
@@ -643,6 +692,22 @@ jobs:
             args+=(--skip-prelink)
           fi
           ./scripts/package.sh "${args[@]}"
+      - name: ccache statistics
+        # Runs even when package failed: a compile error is exactly the case this
+        # cache is for.
+        if: always()
+        run: |
+          set -euo pipefail
+          # A shim that never fires looks identical to a slow build, so say it
+          # out loud. "Cacheable calls" is how many compiles ccache was actually
+          # asked to do; zero means the Makefiles bypassed PATH and the cache is
+          # dead weight rather than a silent no-op.
+          ccache --show-stats || true
+          calls="$(ccache --show-stats | awk -F'[: /]+' '/^Cacheable calls/ {print $2; exit}')"
+          echo "cacheable calls: ${calls:-unknown}"
+          if [ "${calls:-0}" = "0" ]; then
+            echo "::warning::ccache saw no compiles: the PATH shim did not take, so the cache cannot help"
+          fi
       - name: check the kernel the payload step patches
         run: |
           set -euo pipefail
