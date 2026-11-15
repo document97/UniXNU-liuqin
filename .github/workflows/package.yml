@@ -660,20 +660,33 @@ jobs:
           # environment gives it a non-default origin, so the makefiles keep the
           # value as written - and that value can be the wrapper itself.
           #
-          # The wrapper is spelled out with an absolute compiler instead of
-          # relying on PATH: /usr/local/opt/llvm@18/bin sits ahead of /usr/bin on
-          # these runners (the kit links with that keg's lld), and a bare "clang"
-          # resolved to Homebrew LLVM 18 in run 43726464692. LLVM has no
+          # The wrapper is a script rather than "ccache /path/clang": mig runs the
+          # compiler through env, which does not split on spaces, so a two-word
+          # CC becomes a single nonexistent program name and installhdrs dies on
+          # the first MIG rule. A one-file shim keeps CC a single path - and
+          # naming it clang also keeps the makefiles' "is this clang" tests true.
+          #
+          # The path is absolute instead of a bare name on purpose:
+          # /usr/local/opt/llvm@18/bin sits ahead of /usr/bin on these runners
+          # (the kit links with that keg's lld), and a bare "clang" resolved to
+          # Homebrew LLVM 18 in run 43726464692. LLVM has no
           # __builtin_xnu_type_summary, so every kalloc_type() in bsd, osfmk,
           # iokit and security failed with "use of unknown builtin" five minutes
-          # in. ccache did not mask the mistake: it cached the wrong compiler
-          # faithfully. Naming the compiler removes PATH from the question.
+          # in, hundreds of files deep.
           ccache_bin="$(command -v ccache)"
           real_cc="$(/usr/bin/xcrun -find clang)"
           real_cxx="$(/usr/bin/xcrun -find clang++)"
+          wrap="${RUNNER_TEMP}/ccache-wrap"
+          mkdir -p "$wrap"
+          for pair in "clang:${real_cc}" "clang++:${real_cxx}" "cc:${real_cc}" "c++:${real_cxx}"; do
+            name="${pair%%:*}"
+            target="${pair#*:}"
+            printf '#!/bin/sh\nexec %s %s "$@"\n' "${ccache_bin}" "${target}" > "${wrap}/${name}"
+            chmod +x "${wrap}/${name}"
+          done
           {
-            printf 'CC=%s %s\n' "${ccache_bin}" "${real_cc}"
-            printf 'CXX=%s %s\n' "${ccache_bin}" "${real_cxx}"
+            printf 'CC=%s/clang\n' "${wrap}"
+            printf 'CXX=%s/clang++\n' "${wrap}"
             printf 'CCACHE_BASEDIR=%s\n' "$GITHUB_WORKSPACE"
             printf 'CCACHE_NOHASHDIR=true\n'
             # Default compiler check is mtime+size; a restored cache and a fresh
@@ -701,7 +714,7 @@ jobs:
           struct probe_s { int a; };
           int probe_fn(void) { return (int)__builtin_xnu_type_summary(struct probe_s); }
           PROBE
-          if ! "${ccache_bin}" "${real_cc}" -fsyntax-only -target arm64-apple-ios18 \
+          if ! "${wrap}/clang" -fsyntax-only -target arm64-apple-ios18 \
                  "${RUNNER_TEMP}/type-summary-probe.c" 2>"${RUNNER_TEMP}/type-summary-probe.err"; then
             cat "${RUNNER_TEMP}/type-summary-probe.err"
             echo "::error::${real_cc} does not know __builtin_xnu_type_summary, so kalloc_type() cannot compile"
@@ -711,7 +724,7 @@ jobs:
 
           # Prove the wrapper reaches ccache, because a bypass is invisible later.
           printf 'int main(void) { return 0; }\n' > "${RUNNER_TEMP}/ccache-probe.c"
-          if "${ccache_bin}" "${real_cc}" -c "${RUNNER_TEMP}/ccache-probe.c" \
+          if "${wrap}/clang" -c "${RUNNER_TEMP}/ccache-probe.c" \
                -o "${RUNNER_TEMP}/ccache-probe.o" 2>"${RUNNER_TEMP}/ccache-probe.err"; then
             calls="$("${ccache_bin}" --show-stats | awk '/^Cacheable calls:/ {print $3; exit}')"
             echo "probe compile reached ccache: cacheable calls ${calls:-unknown}"
