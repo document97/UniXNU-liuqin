@@ -797,6 +797,18 @@ jobs:
         working-directory: device
         env:
           UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+          # prepare-xnu-source.py reads iokit/DriverKit and EXTERNAL_HEADERS/
+          # TrustCache out of the Apple xnu repository through the REST API.
+          # Without a token those calls are anonymous, which is 60 requests per
+          # hour per source address - and hosted runners share addresses, so
+          # run 43885364872 died nine minutes in with
+          #
+          #   urllib.error.HTTPError: HTTP Error 403: rate limit exceeded
+          #
+          # after the patches had applied and before a single file compiled.
+          # The workflow's own token raises that to 5000 per hour and is sent
+          # to api.github.com / raw.githubusercontent.com only.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           UNIXNU_UEFI: ${{ github.workspace }}/uefi-liuqin
           UNIXNU_DEVICE: ${{ github.workspace }}/device
           PONG_VOLUME_LAYOUT: ${{ github.workspace }}/ci-volume-layout.json
