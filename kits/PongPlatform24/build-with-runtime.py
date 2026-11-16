@@ -37,11 +37,17 @@ def overlay(device, destination):
     scripts = destination / 'scripts'
     scripts.mkdir(exist_ok=True)
     selected = {}
-    for source in (device / 'scripts').iterdir():
-        if not source.is_file() or source.name.endswith('.pyc'):
+    # Recursive, because tree.assemble copies scripts/ the same way and the
+    # prelink modules now live in scripts/prelink/. A top-level-only copy left
+    # that directory behind and the kernel build died with
+    # "No module named 'native_prelink'" from prepare-ipados18-storage.py.
+    for source in sorted((device / 'scripts').rglob('*')):
+        if source.is_dir() or source.name.endswith('.pyc') or '__pycache__' in source.parts:
             continue
-        shutil.copy2(source, scripts / source.name)
-        selected[source.name] = 'scripts/' + source.name
+        relative = source.relative_to(device / 'scripts')
+        (scripts / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, scripts / relative)
+        selected[relative.as_posix()] = 'scripts/' + relative.as_posix()
     for source in (HERE / 'build-support/merged-scripts').iterdir():
         if not source.is_file():
             continue

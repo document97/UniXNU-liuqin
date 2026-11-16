@@ -768,6 +768,22 @@ jobs:
           grep -oE '(Could not|Failed to|Not storing|not storable|No space)[^\n]{0,140}' \
             "${RUNNER_TEMP}/store-probe.log" 2>/dev/null | tail -3 || true
           echo "cache after the store probe: $(du -sh "${CCACHE_DIR}" 2>/dev/null | cut -f1 || echo none)"
+
+          # 1043 of 1275 uncacheable calls were "unsupported compiler option",
+          # which is about the size of the XNU tree: the cache may be unable to
+          # help with the kernel at all. Ask ccache directly, one flag at a time,
+          # rather than inferring it from counters after another 30 minutes.
+          for opt in -mkernel -fapple-kext -static -fno-common -mgeneral-regs-only \
+                     -fno-sanitize=undefined -fno-stack-protector -fno-builtin; do
+            printf 'int opt_probe(void) { return 0; }\n' > "${RUNNER_TEMP}/opt-probe.c"
+            CCACHE_LOGFILE="${RUNNER_TEMP}/opt-probe.log" \
+              "${wrap}/clang" -c "$opt" "${RUNNER_TEMP}/opt-probe.c" \
+              -o "${RUNNER_TEMP}/opt-probe.o" 2>/dev/null || true
+            verdict="$(grep -o 'Unsupported compiler option[^\n]*' "${RUNNER_TEMP}/opt-probe.log" 2>/dev/null | head -1)"
+            if [ -n "$verdict" ]; then
+              echo "ccache rejects ${opt}: ${verdict}"
+            fi
+          done
           sysctl -n hw.ncpu
       - name: package
         working-directory: device
