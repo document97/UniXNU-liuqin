@@ -51,11 +51,13 @@ archives = []
 # board carried before the format 2 rewrite.
 tool = "kits/NativePrelink/emit_prelink.py"
 kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_PONG/mach.development.pong"
-# The slide is the one the 21H461 profile qualifies; this board's fixed base
-# comes from the 22H374 storage bindings and is not yet expressed as a slide
-# here. Until it is, scripts/package.sh is run with --skip-prelink and the
-# boot image carries the native kernel (see the packaging area of porting.toml).
-slide = "-0x1000000"
+# The slide is derived from the 22H374 kernelcache at prelink time: the
+# prelinker rebases its prelinked segments onto 0xfffffff00b000000, the same
+# fixed base scripts/prepare-ipados18-storage.py uses when it derives the
+# storage imports. A hardcoded value would be the 21H461 page difference and
+# would silently place every kext at the wrong address if the two builds start
+# on different pages.
+slide = "auto"
 roots = ["com.apple.kec.corecrypto", "com.apple.kec.pthread", "com.apple.filesystems.apfs",
          "com.apple.kec.Compression", "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib"]
 [firmware]

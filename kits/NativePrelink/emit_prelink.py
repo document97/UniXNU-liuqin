@@ -27,6 +27,33 @@ MATH_LITERAL_POOLS = (
 COALESCED = {'__PRELINK_TEXT': '__TEXT', '__PLK_TEXT_EXEC': '__TEXT_EXEC',
              '__PLK_DATA_CONST': '__DATA_CONST', '__PRELINK_DATA': '__DATA'}
 
+# Where the original kexts have to land. scripts/prepare-ipados18-storage.py
+# pins the same constant when it derives the storage imports, so the addresses
+# it bakes into the kernel and the addresses the prelinked kexts run at cannot
+# drift apart: both are the original VA plus this base minus the original base.
+FIXED_PRELINK_BASE = 0xfffffff00b000000
+
+
+def auto_slide(original_data):
+    """Rebase the stock kernelcache onto FIXED_PRELINK_BASE.
+
+    The board carried slide = -0x1000000, which is the 21H461 figure and only
+    happens to equal this difference when both collections start at the same
+    page. Taking the base out of the kernelcache itself removes that guess; it
+    is the same subtraction prepare-ipados18-storage.py performs before it
+    writes fixed_prelink_base - base into the bindings.
+    """
+    segments = macho(original_data)['segments']
+    bases = [s['va'] for s in segments if s['name'].startswith('__PRELINK') and s['size']]
+    if not bases:
+        raise ValueError('Original kernelcache has no prelinked segment to rebase')
+    base = min(bases)
+    slide = FIXED_PRELINK_BASE - base
+    if slide % 4096:
+        raise ValueError(f'Derived slide {slide:#x} is not 4K aligned')
+    print(f'slide: auto {slide:#x} ({base:#x} -> {FIXED_PRELINK_BASE:#x})')
+    return slide
+
 
 def align(value):
     return (value + 4095) & ~4095
@@ -347,7 +374,9 @@ def main():
     parser.add_argument('--kernel', required=True, type=Path)
     parser.add_argument('--prelinked', required=True, type=Path)
     parser.add_argument('--root', required=True, action='append')
-    parser.add_argument('--slide', required=True, type=lambda value: int(value, 0))
+    parser.add_argument('--slide', required=True,
+                        help='"auto" rebases onto FIXED_PRELINK_BASE using the original kernelcache, '
+                             'any other value is a decimal/hex slide')
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--early-security-init', action='append', default=[], metavar='BUNDLE=ORIGINAL_VA',
                         help='Explicit original void(void) policy initializer, called before lockdown; requires source ABI')
@@ -358,7 +387,9 @@ def main():
         if not separator or not identifier or identifier in initializers:
             parser.error('Use one BUNDLE=ORIGINAL_VA initializer per module')
         initializers[identifier] = int(address, 0)
-    image, report = emit(args.kernel.read_bytes(), args.prelinked.read_bytes(), args.root, args.slide, initializers)
+    original_data = args.prelinked.read_bytes()
+    slide = auto_slide(original_data) if args.slide.strip() == 'auto' else int(args.slide, 0)
+    image, report = emit(args.kernel.read_bytes(), original_data, args.root, slide, initializers)
     if args.output.exists():
         raise SystemExit('Refuse to overwrite an existing candidate')
     args.output.parent.mkdir(parents=True, exist_ok=True)

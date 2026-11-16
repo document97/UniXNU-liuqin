@@ -65,7 +65,12 @@ on:
       prelink:
         description: "Prelink the original 22H374 kernelcache into kernel.macho"
         type: boolean
-        default: false
+        # On by default since the native kernel stopped at pthread_init: the
+        # function tables the kernel expects (pthread, corecrypto, apfs) only
+        # exist once the stock kexts are prelinked in. The slide is derived
+        # from the kernelcache itself now, so the old hardcoded 21H461 figure
+        # is no longer a reason to keep this off.
+        default: true
       ipsw_url:
         description: "https URL of the iPadOS 18.7.10 / 22H374 restore (.ipsw). Empty skips the userdata image."
         type: string
@@ -783,7 +788,15 @@ jobs:
           calls="$(ccache --show-stats | awk '/^Cacheable calls:/ {print $3; exit}')"
           echo "cacheable calls: ${calls:-unknown}"
           echo "cache size: $(du -sh "${CCACHE_DIR}" 2>/dev/null | cut -f1 || echo none)"
-          log="${RUNNER_TEMP}/ccache.log"
+          # 775 misses and 0 stores in one run is not a tuning problem, it is a
+          # ccache that refuses to write, and every guess about why has cost a
+          # 33 minute build. Print what ccache thinks its own settings are and,
+          # when the log is missing, its built-in log summary; both name the
+          # reason (read_only, a bad temporary directory, a full limit).
+          echo "CCACHE_LOGFILE=${CCACHE_LOGFILE:-unset}"
+          ccache -p 2>/dev/null | grep -E 'read_only|temporary_dir|cache_dir|log_file|max_size|limit_multiple|compiler_check|sloppiness' | head -12 || true
+          ls -ld "${CCACHE_DIR}" "${CCACHE_DIR}/tmp" 2>&1 | head -3 || true
+          log="${CCACHE_LOGFILE:-${RUNNER_TEMP}/ccache.log}"
           if [ -f "$log" ]; then
             echo "ccache decisions:"
             grep -o 'Result: [a-z_]*' "$log" | sort | uniq -c | sort -rn | head -8 || true
@@ -792,7 +805,11 @@ jobs:
             if [ "${stored:-0}" = "0" ]; then
               echo "::warning::ccache stored nothing this run; the next build will compile from scratch again"
               grep -oE '(Could not|Failed to|disable|read-only)[^\n]{0,120}' "$log" | sort | uniq -c | sort -rn | head -5 || true
+              tail -n 25 "$log" | cut -c1-200 || true
             fi
+          else
+            echo "no ccache log at ${log}; asking ccache for its own summary"
+            ccache --show-log-stats 2>&1 | head -30 || true
           fi
           if [ "${calls:-0}" = "0" ]; then
             echo "::warning::ccache saw no compiles: CC did not reach ccache, so the cache cannot help"
