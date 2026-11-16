@@ -773,17 +773,25 @@ jobs:
           # which is about the size of the XNU tree: the cache may be unable to
           # help with the kernel at all. Ask ccache directly, one flag at a time,
           # rather than inferring it from counters after another 30 minutes.
+          # set -e makes this loop dangerous: an assignment whose command
+          # substitution exits non-zero is itself a failure, so a grep that
+          # simply found nothing took the whole job down (run 43849340963
+          # died at 10:41 in this loop, after the compiler gate had passed).
+          # Every probe is diagnostic, so none of them may decide the outcome.
           for opt in -mkernel -fapple-kext -static -fno-common -mgeneral-regs-only \
                      -fno-sanitize=undefined -fno-stack-protector -fno-builtin; do
             printf 'int opt_probe(void) { return 0; }\n' > "${RUNNER_TEMP}/opt-probe.c"
             CCACHE_LOGFILE="${RUNNER_TEMP}/opt-probe.log" \
               "${wrap}/clang" -c "$opt" "${RUNNER_TEMP}/opt-probe.c" \
               -o "${RUNNER_TEMP}/opt-probe.o" 2>/dev/null || true
-            verdict="$(grep -o 'Unsupported compiler option[^\n]*' "${RUNNER_TEMP}/opt-probe.log" 2>/dev/null | head -1)"
-            if [ -n "$verdict" ]; then
+            verdict="$(grep -oE 'Unsupported compiler option.*' "${RUNNER_TEMP}/opt-probe.log" 2>/dev/null | head -1 || true)"
+            if [ -n "${verdict:-}" ]; then
               echo "ccache rejects ${opt}: ${verdict}"
+            else
+              result="$(grep -oE 'Result: [a-z_]+' "${RUNNER_TEMP}/opt-probe.log" 2>/dev/null | tail -1 || true)"
+              echo "ccache accepts ${opt} (${result:-no result recorded})"
             fi
-          done
+          done || true
           sysctl -n hw.ncpu
       - name: package
         working-directory: device
