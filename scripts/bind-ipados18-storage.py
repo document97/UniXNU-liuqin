@@ -2,7 +2,7 @@
 """Link Pong UFS to the selected Darwin 24 storage family without old addresses."""
 import argparse,json,struct,subprocess,sys
 from pathlib import Path
-ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'kits/NativePrelink'))
+ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'scripts/prelink'))
 import native_prelink as np
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('--object',type=Path,required=True);p.add_argument('--output',type=Path,required=True);a=p.parse_args()
 r=json.loads((ROOT/'mac-build/storage-abi18/bindings-layout.json').read_text())

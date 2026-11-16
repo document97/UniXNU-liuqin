@@ -4,7 +4,7 @@ import argparse,json,os,re,shutil,struct,subprocess,sys
 from pathlib import Path
 DEVICE=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(DEVICE/'scripts'))
-sys.path.insert(0,str(DEVICE/'kits/NativePrelink'))
+sys.path.insert(0,str(DEVICE/'scripts/prelink'))
 import pong_paths
 import native_prelink as np
 p=argparse.ArgumentParser(description=__doc__)

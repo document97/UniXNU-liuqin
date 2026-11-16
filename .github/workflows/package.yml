@@ -750,6 +750,24 @@ jobs:
             echo "::warning::ccache probe failed, so the kernel build will run uncached"
             cat "${RUNNER_TEMP}/ccache-probe.err"
           fi
+
+          # Two runs in a row reported ~775 misses and zero stored results while
+          # the cache directory stayed at the 25 MB an earlier run left behind.
+          # Reproduce that in five seconds instead of discovering it after a
+          # 33 minute build: compile a body that cannot exist in any earlier run,
+          # let ccache write its own verdict, and print it. CCACHE_LOGFILE is in
+          # GITHUB_ENV, which only takes effect in later steps, so it is set here
+          # for this one compile.
+          printf 'int store_probe_%s(void) { return %s; }\n' "$GITHUB_RUN_ID" "$RANDOM" \
+            > "${RUNNER_TEMP}/store-probe.c"
+          CCACHE_LOGFILE="${RUNNER_TEMP}/store-probe.log" \
+            "${wrap}/clang" -c "${RUNNER_TEMP}/store-probe.c" \
+            -o "${RUNNER_TEMP}/store-probe.o" || true
+          echo "store probe verdict:"
+          grep -o 'Result: [a-z_]*' "${RUNNER_TEMP}/store-probe.log" 2>/dev/null | tail -3 || true
+          grep -oE '(Could not|Failed to|Not storing|not storable|No space)[^\n]{0,140}' \
+            "${RUNNER_TEMP}/store-probe.log" 2>/dev/null | tail -3 || true
+          echo "cache after the store probe: $(du -sh "${CCACHE_DIR}" 2>/dev/null | cut -f1 || echo none)"
           sysctl -n hw.ncpu
       - name: package
         working-directory: device
@@ -780,35 +798,42 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          # Every ccache invocation truncates CCACHE_LOGFILE when it opens it, so
+          # the previous version of this step read the file its own first command
+          # had just emptied and reported "stored 0" no matter what the build did.
+          # Copy first, ask questions later.
+          log="${CCACHE_LOGFILE:-${RUNNER_TEMP}/ccache.log}"
+          runlog="${RUNNER_TEMP}/ccache-run.log"
+          if [ -f "$log" ]; then
+            cp "$log" "$runlog"
+            echo "captured $(wc -l < "$runlog") log lines from the last compile"
+          else
+            echo "no ccache log at ${log}"
+          fi
           # A shim that never fires looks identical to a slow build, so say it
           # out loud. "Cacheable calls" is how many compiles ccache was actually
           # asked to do; zero means the Makefiles bypassed PATH and the cache is
           # dead weight rather than a silent no-op.
-          ccache --show-stats || true
+          ccache --show-stats -v || true
           calls="$(ccache --show-stats | awk '/^Cacheable calls:/ {print $3; exit}')"
           echo "cacheable calls: ${calls:-unknown}"
           echo "cache size: $(du -sh "${CCACHE_DIR}" 2>/dev/null | cut -f1 || echo none)"
-          # 775 misses and 0 stores in one run is not a tuning problem, it is a
-          # ccache that refuses to write, and every guess about why has cost a
-          # 33 minute build. Print what ccache thinks its own settings are and,
-          # when the log is missing, its built-in log summary; both name the
-          # reason (read_only, a bad temporary directory, a full limit).
           echo "CCACHE_LOGFILE=${CCACHE_LOGFILE:-unset}"
           ccache -p 2>/dev/null | grep -E 'read_only|temporary_dir|cache_dir|log_file|max_size|limit_multiple|compiler_check|sloppiness' | head -12 || true
           ls -ld "${CCACHE_DIR}" "${CCACHE_DIR}/tmp" 2>&1 | head -3 || true
-          log="${CCACHE_LOGFILE:-${RUNNER_TEMP}/ccache.log}"
-          if [ -f "$log" ]; then
-            echo "ccache decisions:"
-            grep -o 'Result: [a-z_]*' "$log" | sort | uniq -c | sort -rn | head -8 || true
-            stored="$(grep -c 'Result: stored' "$log" || true)"
+          if [ -s "$runlog" ]; then
+            echo "ccache decisions in the last compile:"
+            grep -o 'Result: [a-z_]*' "$runlog" | sort | uniq -c | sort -rn | head -8 || true
+            stored="$(grep -c 'Result: stored' "$runlog" || true)"
             echo "results stored: ${stored:-0}"
             if [ "${stored:-0}" = "0" ]; then
-              echo "::warning::ccache stored nothing this run; the next build will compile from scratch again"
-              grep -oE '(Could not|Failed to|disable|read-only)[^\n]{0,120}' "$log" | sort | uniq -c | sort -rn | head -5 || true
-              tail -n 25 "$log" | cut -c1-200 || true
+              echo "::warning::ccache stored nothing in the last compile; check the reason below"
             fi
+            # 775 misses with 0 stores is not tuning, it is a refusal, and the
+            # reason is written in the log ("Could not ...", "Failed to ...").
+            grep -oE '(Could not|Failed to|Not storing|not storable|disable)[^\n]{0,140}' "$runlog" | sort | uniq -c | sort -rn | head -8 || true
+            tail -n 30 "$runlog" | cut -c1-200 || true
           else
-            echo "no ccache log at ${log}; asking ccache for its own summary"
             ccache --show-log-stats 2>&1 | head -30 || true
           fi
           if [ "${calls:-0}" = "0" ]; then

@@ -4,7 +4,7 @@ import argparse,json,os,subprocess,sys,time
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts'))
-sys.path.insert(0,str(ROOT/'kits/NativePrelink'))
+sys.path.insert(0,str(ROOT/'scripts/prelink'))
 import pong_paths
 from emit_prelink import emit,COALESCED
 from native_prelink import arm64_image,macho,plan

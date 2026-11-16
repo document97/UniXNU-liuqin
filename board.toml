@@ -49,7 +49,7 @@ archives = []
 [kernel.prelink]
 # The native aggregate the recipe leaves at this path, and the prelinker this
 # board carried before the format 2 rewrite.
-tool = "kits/NativePrelink/emit_prelink.py"
+tool = "scripts/prelink/emit_prelink.py"
 kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_PONG/mach.development.pong"
 # The slide is derived from the 22H374 kernelcache at prelink time: the
 # prelinker rebases its prelinked segments onto 0xfffffff00b000000, the same
