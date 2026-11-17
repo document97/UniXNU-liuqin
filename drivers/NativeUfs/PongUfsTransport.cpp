@@ -569,8 +569,12 @@ extern "C" bool pong_ufs_transport_start(IOService *provider) {
   OSSharedPtr<const OSSymbol> name(OSSymbol::withCStringNoCopy("IOBlockStorageDevice"), OSNoRetain);
   const OSMetaClass *meta = name ? OSMetaClass::getMetaClassWithName(name.get()) : nullptr;
   const OSMetaClass *declared = &IOBlockStorageDevice::gMetaClass;
-  IOLog("PONG_UFS: storage meta by-name=%p declared=%p size=%u super=%p\n",
-        meta, declared, declared->getClassSize(), declared->getSuperClass());
+  IOLog("PONG_UFS: storage meta by-name=%p declared=%p size=%u(want %zu) super=%p(want %p)\n",
+        meta, declared, declared->getClassSize(), sizeof(IOBlockStorageDevice),
+        declared->getSuperClass(), &IOService::gMetaClass);
+  if (meta)
+    IOLog("PONG_UFS: by-name class size=%u super=%p\n",
+          meta->getClassSize(), meta->getSuperClass());
   // A prelinked kext whose C++ constructors did not run leaves the name out of
   // the metaclass table while the class the compiler linked us to stays valid.
   // Probe that class instead of refusing to touch the controller at all; the
