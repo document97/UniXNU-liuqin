@@ -10,7 +10,7 @@ struct UfsSmmuPlan {
 // ARM IHI 0062D.c sections 1.6 and 3.7: VA64=0 still rejects inputs above
 // 32 bits with SCTLR.M=0. With VA64=1 the bypass range is bounded by all
 // three hardware widths, not TCR2.PASize (which only limits translation).
-static unsigned ufsSmmuAddressBits(unsigned code)
+__attribute__((unused)) static unsigned ufsSmmuAddressBits(unsigned code)
 {
   switch (code) {
     case 0: return 32; case 1: return 36; case 2: return 40;
@@ -19,7 +19,7 @@ static unsigned ufsSmmuAddressBits(unsigned code)
   }
 }
 template <class Read>
-static UfsSmmuPlan planUfsSmmuBank(uint16_t stream, uint64_t dma, uint64_t bytes, Read read,
+__attribute__((unused)) static UfsSmmuPlan planUfsSmmuBank(uint16_t stream, uint64_t dma, uint64_t bytes, Read read,
                                   unsigned ownedBanks, unsigned ownedGroups, unsigned bankFromTop)
 {
   UfsSmmuPlan p;
@@ -95,7 +95,7 @@ static UfsSmmuPlan planUfsSmmuBank(uint16_t stream, uint64_t dma, uint64_t bytes
 // Upstream's bounded warm-reset fallback, intersected with Pong's owned
 // ranges above. Keep exact SID matching, firmware migration and VA64 checks.
 template <class Read>
-static UfsSmmuPlan planUfsSmmu(uint16_t stream, uint64_t dma, uint64_t bytes, Read read,
+__attribute__((unused)) static UfsSmmuPlan planUfsSmmu(uint16_t stream, uint64_t dma, uint64_t bytes, Read read,
                               unsigned ownedBanks, unsigned ownedGroups)
 {
   UfsSmmuPlan first = planUfsSmmuBank(stream, dma, bytes, read, ownedBanks, ownedGroups, 0);
@@ -119,7 +119,7 @@ static UfsSmmuPlan planUfsSmmu(uint16_t stream, uint64_t dma, uint64_t bytes, Re
 // streams sharing this bank and enabled translation; no live context is
 // disabled here. Write callbacks must complete an MMIO barrier before return.
 template <class Read, class Write>
-static const char *configureUfsSmmu(const UfsSmmuPlan &p, uint16_t stream, Read read, Write write)
+__attribute__((unused)) static const char *configureUfsSmmu(const UfsSmmuPlan &p, uint16_t stream, Read read, Write write)
 {
   if (p.error) return p.error;
   unsigned cb = (p.pages + p.bank) * 4096;
