@@ -118,6 +118,17 @@ static bool transportFailure(const char *why) {
   gHost.ready = false;
   // No panic, reset, retry or DMA release after a timeout. The controller
   // may still own the allocation. Preserve evidence and let BSD continue.
+  // Print the descriptors themselves as well: the summary says what the host
+  // believes, these say what the controller was actually handed.
+  if (gHost.virt) {
+    const volatile uint32_t *utrd = reinterpret_cast<const volatile uint32_t *>(gHost.virt);
+    const volatile uint8_t *ucd = reinterpret_cast<const volatile uint8_t *>(gHost.virt + kUcdOffset);
+    IOLog("PONG_UFS: UTRD %08x %08x %08x %08x %08x %08x %08x %08x\n",
+          utrd[0], utrd[1], utrd[2], utrd[3], utrd[4], utrd[5], utrd[6], utrd[7]);
+    IOLog("PONG_UFS: UCD %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+          ucd[0], ucd[1], ucd[2], ucd[3], ucd[4], ucd[5], ucd[6], ucd[7],
+          ucd[8], ucd[9], ucd[10], ucd[11], ucd[12], ucd[13], ucd[14], ucd[15]);
+  }
   char text[2400];
   formatUfsRootDiagnostics(text, sizeof(text), gRootDiagnostic, why, "PONG_UFS TRANSPORT");
   IOLog("%s\nPONG_UFS: no media published; continue boot\n", text);

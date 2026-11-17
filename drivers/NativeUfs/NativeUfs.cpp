@@ -89,6 +89,15 @@ constexpr unsigned kUicArg3 = 0x9c;
 constexpr uint32_t kUicDone = 1U << 10;
 constexpr uint32_t kDmeLinkStartup = 0x16;
 
+// Interrupt status bit2 is UIC error; HCS bit3 says the UIC accepts a command.
+// A loader that tears UFS down leaves the UIC error latched while HCS keeps
+// reporting the device present, because nobody clears either on the way out.
+constexpr uint32_t kIsUicError = 1U << 2;
+constexpr uint32_t kHcsDevicePresent = 1U << 0;
+constexpr uint32_t kHcsUicReady = 1U << 3;
+constexpr unsigned kUicErrorDataLink = 0x3c;
+constexpr unsigned kInterruptStatus = 0x20;
+
 enum ReportIndex : unsigned {
   ReportGdsc, ReportAxi, ReportAhb, ReportTx, ReportRx0, ReportRx1,
   ReportUnipro, ReportIce, ReportAux, ReportAggregate,
@@ -361,17 +370,31 @@ struct UfsHost {
     IOLog ("PONG_UFS: HCE %08x -> %08x hcs=%08x\n", before, hce, status);
   }
 
-  // Only worth asking for a link when the controller answers and the device is
-  // not already present: a second startup on a live link throws away a state
-  // the loader may have handed over for free.
+  // A handover can leave the device marked present while the link is dead. The
+  // loader pulls the clocks and the block reset on its way out, the UniPro layer
+  // latches a data-link error, and HCS keeps reporting DP=1 because nothing
+  // clears it -- so presence alone is not proof that a command will ever reach
+  // the device. A latched UIC error is: clear it and bring the link up again
+  // instead of trusting the handover.
   void requestLink ()
   {
-    if (!(hce & 1U) || (status & 1U)) return;
+    if (!(hce & 1U)) return;
+    uint32_t latched = read32 (base, kInterruptStatus) & kIsUicError;
+    uint32_t dataLink = read32 (base, kUicErrorDataLink);
+    bool degraded = latched || dataLink;
+    if ((status & kHcsDevicePresent) && !degraded) return;
+    if (degraded) write32 (base, kInterruptStatus, kIsUicError);
+    for (unsigned spin = 0; spin < 1000 && !(read32 (base, 0x30) & kHcsUicReady); ++spin)
+      IODelay (10);
     uint32_t result = uicLinkStartup (base);
-    IOLog ("PONG_UFS: DME_LINKSTARTUP result=%08x hcs=%08x uic=%08x/%08x/%08x\n",
-           result, read32 (base, 0x30), read32 (base, 0x40),
-           read32 (base, 0x44), read32 (base, 0x48));
+    for (unsigned spin = 0; spin < 1000 && !(read32 (base, 0x30) & kHcsDevicePresent); ++spin)
+      IODelay (10);
+    IOLog ("PONG_UFS: DME_LINKSTARTUP(%s) result=%08x hcs=%08x dl=%08x->%08x ue=%08x\n",
+           degraded ? "recover" : "absent", result, read32 (base, 0x30),
+           dataLink, read32 (base, kUicErrorDataLink),
+           read32 (base, kInterruptStatus) & kIsUicError);
     status = read32 (base, 0x30);
+    interruptStatus = read32 (base, kInterruptStatus);
   }
 
   void publish ()
