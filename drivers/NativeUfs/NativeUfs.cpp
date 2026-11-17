@@ -40,11 +40,12 @@ namespace {
 constexpr uint64_t kGccUfsPage = 0x00187000ULL;
 constexpr uint64_t kUfsHost = 0x01d84000ULL;
 constexpr uint64_t kUfsHostBytes = 0x3000ULL;
-// The QMP PHY sits one page above the host controller on this SoC, and it is
-// laid out in v6 groups: serdes at 0, PCS at 0x400, TX at 0x1000, RX at 0x1200.
-// SM8475 selects qmp_ufs_offsets_v6, so the older 0x400/0x600/0xc00 grouping
-// names the wrong blocks -- 0x400 is PCS, not TX. The window has to cover RX.
-constexpr uint64_t kUfsPhyPage = 0x01d87000ULL;
+// SM8475 moves the QMP PHY to 0x1d80000 (sm8475.dtsi: phy@1d80000, 0x2000);
+// 0x1d87000 is where sm8450 puts it, one page past the end of this host window.
+// The block is laid out in v6 groups: serdes at 0, PCS at 0x400, TX at 0x1000,
+// RX at 0x1200. SM8475 selects qmp_ufs_offsets_v6, so the older
+// 0x400/0x600/0xc00 grouping names the wrong blocks -- 0x400 is PCS, not TX.
+constexpr uint64_t kUfsPhyPage = 0x01d80000ULL;
 constexpr uint64_t kUfsPhyBytes = 0x2000ULL;
 constexpr unsigned kPhySerdes = 0x000;
 constexpr unsigned kPhyPcs = 0x400;
