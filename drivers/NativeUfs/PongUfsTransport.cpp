@@ -568,9 +568,17 @@ extern "C" bool pong_ufs_transport_start(IOService *provider) {
   // Original prelinked storage metadata must be initialized before allocation.
   OSSharedPtr<const OSSymbol> name(OSSymbol::withCStringNoCopy("IOBlockStorageDevice"), OSNoRetain);
   const OSMetaClass *meta = name ? OSMetaClass::getMetaClassWithName(name.get()) : nullptr;
-  if (meta != &IOBlockStorageDevice::gMetaClass)
-    return transportFailure("original storage metaclass not registered");
-  if (meta->getClassSize() != sizeof(IOBlockStorageDevice) || meta->getSuperClass() != &IOService::gMetaClass)
+  const OSMetaClass *declared = &IOBlockStorageDevice::gMetaClass;
+  IOLog("PONG_UFS: storage meta by-name=%p declared=%p size=%u super=%p\n",
+        meta, declared, declared->getClassSize(), declared->getSuperClass());
+  // A prelinked kext whose C++ constructors did not run leaves the name out of
+  // the metaclass table while the class the compiler linked us to stays valid.
+  // Probe that class instead of refusing to touch the controller at all; the
+  // size/parent check below still rejects a stub or a foreign generation.
+  if (meta != declared)
+    IOLog("PONG_UFS: storage metaclass name unregistered; using the linked class\n");
+  if (declared->getClassSize() != sizeof(IOBlockStorageDevice) ||
+      declared->getSuperClass() != &IOService::gMetaClass)
     return transportFailure("original storage class/parent ABI mismatch");
   if (!hostBringUp()) return false;
   RootLayout layout;

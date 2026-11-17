@@ -40,6 +40,11 @@ static uint32_t read32 (uintptr_t base, unsigned offset)
   return *reinterpret_cast<volatile uint32_t *> (base + offset);
 }
 
+static void write32 (uintptr_t base, unsigned offset, uint32_t value)
+{
+  *reinterpret_cast<volatile uint32_t *> (base + offset) = value;
+}
+
 static bool contains (const char *data, size_t length, const char *needle)
 {
   size_t wanted = strlen (needle);
@@ -187,22 +192,61 @@ bool NativeUfs::start (IOService *provider)
   native_ufs_status = 2;
 
   // Offsets are from upstream gcc-sm8450.c, which also matches qcom,sm8475-gcc.
-  pong_ufs_report[ReportGdsc] = read32 (gcc, 0x004);
-  pong_ufs_report[ReportAxi] = read32 (gcc, 0x018);
-  pong_ufs_report[ReportAhb] = read32 (gcc, 0x020);
-  pong_ufs_report[ReportTx] = read32 (gcc, 0x024);
-  pong_ufs_report[ReportRx0] = read32 (gcc, 0x028);
-  pong_ufs_report[ReportRx1] = read32 (gcc, 0x0c0);
-  pong_ufs_report[ReportUnipro] = read32 (gcc, 0x064);
-  pong_ufs_report[ReportIce] = read32 (gcc, 0x06c);
-  pong_ufs_report[ReportAux] = read32 (gcc, 0x0a4);
-  pong_ufs_report[ReportAggregate] = read32 (gcc, 0x0d4);
+  auto snapshot = [&] {
+    pong_ufs_report[ReportGdsc] = read32 (gcc, 0x004);
+    pong_ufs_report[ReportAxi] = read32 (gcc, 0x018);
+    pong_ufs_report[ReportAhb] = read32 (gcc, 0x020);
+    pong_ufs_report[ReportTx] = read32 (gcc, 0x024);
+    pong_ufs_report[ReportRx0] = read32 (gcc, 0x028);
+    pong_ufs_report[ReportRx1] = read32 (gcc, 0x0c0);
+    pong_ufs_report[ReportUnipro] = read32 (gcc, 0x064);
+    pong_ufs_report[ReportIce] = read32 (gcc, 0x06c);
+    pong_ufs_report[ReportAux] = read32 (gcc, 0x0a4);
+    pong_ufs_report[ReportAggregate] = read32 (gcc, 0x0d4);
+  };
+  snapshot ();
   pong_ufs_report[ReportStream] = kUfsStreamId;
+  IOLog ("PONG_UFS: GCC before gdsc=%08x axi=%08x ahb=%08x aggr=%08x\n",
+         pong_ufs_report[ReportGdsc], pong_ufs_report[ReportAxi],
+         pong_ufs_report[ReportAhb], pong_ufs_report[ReportAggregate]);
 
+  // A loader that leaves UFS running hands over live clocks. One that tears the
+  // controller down hands over CBCR bit0 (CLK_OFF) set and the GDSC collapsed --
+  // which reads as a host window full of zeroes. Bring both back first, then
+  // judge on the re-read state instead of the handover state.
+  uint32_t gdsc = pong_ufs_report[ReportGdsc];
+  if (!(gdsc & 0x80000000U)) {
+    write32 (gcc, 0x004, gdsc & ~0x40000000U);
+    for (unsigned spin = 0; spin < 1000; ++spin) {
+      if (read32 (gcc, 0x004) & 0x80000000U) break;
+      IODelay (10);
+    }
+    IOLog ("PONG_UFS: GDSC collapsed (%08x), power-up -> %08x\n",
+           gdsc, read32 (gcc, 0x004));
+  }
+  struct Gate { const char *name; unsigned offset; };
+  const Gate gates[] = {
+    {"axi", 0x018}, {"ahb", 0x020}, {"tx", 0x024}, {"rx0", 0x028},
+    {"rx1", 0x0c0}, {"unipro", 0x064}, {"ice", 0x06c}, {"aux", 0x0a4},
+    {"aggr", 0x0d4}
+  };
+  for (const auto &gate : gates) {
+    uint32_t value = read32 (gcc, gate.offset);
+    if (!(value & 1U)) continue;
+    write32 (gcc, gate.offset, value & ~1U);
+    for (unsigned spin = 0; spin < 1000; ++spin) {
+      if (!(read32 (gcc, gate.offset) & 1U)) break;
+      IODelay (10);
+    }
+    IOLog ("PONG_UFS: clock %s CLK_OFF cleared %08x -> %08x\n",
+           gate.name, value, read32 (gcc, gate.offset));
+  }
+  snapshot ();
   bool powered = (pong_ufs_report[ReportGdsc] & 0x80000000U) != 0;
-  bool buses = (pong_ufs_report[ReportAxi] & 1U) &&
-               (pong_ufs_report[ReportAhb] & 1U) &&
-               (pong_ufs_report[ReportAggregate] & 1U);
+  // CBCR bit0 is CLK_OFF, so a running gate reads zero there.
+  bool buses = !(pong_ufs_report[ReportAxi] & 1U) &&
+               !(pong_ufs_report[ReportAhb] & 1U) &&
+               !(pong_ufs_report[ReportAggregate] & 1U);
   if (powered && buses) {
     IOLog ("PONG_UFS: clocks active, read host state\n");
     uintptr_t host = mapPhysical (kUfsHost, kUfsHostBytes, hostMap);

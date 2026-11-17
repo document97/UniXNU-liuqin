@@ -941,6 +941,7 @@ jobs:
             --board "${BOARD}" \
             --abl-dtb "${RUNNER_TEMP}/stock/liuqin-cape.dtb" \
             --unique-chip-id "${UNIXNU_UNIQUE_CHIP_ID}" \
+            --ufs-probe \
             --volume-layout ci-volume-layout.json
       - name: check the products
         run: |
