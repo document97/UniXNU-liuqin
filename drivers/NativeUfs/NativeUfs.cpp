@@ -1,6 +1,20 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // SM8475/Pong frontend. Optional register/registry probes default off;
 // the functional transport only issues read-only storage commands.
+//
+// Bring-up runs as a fixed sequence of stages, each owning one question and
+// reporting through the same register snapshot:
+//
+//   validateDescription   does the board description match this SoC?
+//   bringUpClocks         are the UFS clocks running, and can we fix them?
+//   UfsHost::sample       is the controller answering at all?
+//   UfsHost::enableController  did the loader leave it disabled?
+//   probePhy              did the loader leave the PHY powered?
+//   UfsHost::requestLink  is there a device on the other side of the link?
+//
+// No stage assumes the previous one worked, and every stage is bounded in
+// time, so a failure leaves one readable snapshot instead of a half-applied
+// sequence. Change one stage at a time; the others do not move.
 #include <IOKit/IOService.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOLib.h>
@@ -32,6 +46,23 @@ constexpr uint64_t kUfsHostBytes = 0x3000ULL;
 constexpr uint64_t kUfsPhyPage = 0x01d87000ULL;
 constexpr uint32_t kUfsStreamId = 0xe0;
 
+// GDSC: bit31 is PWR_ON, bit30 is SW_COLLAPSE. CBCR bit0 is CLK_OFF, so a gate
+// that is running reads zero there.
+constexpr unsigned kGdscOffset = 0x004;
+constexpr uint32_t kGdscPowerOn = 1U << 31;
+constexpr uint32_t kGdscSwCollapse = 1U << 30;
+constexpr uint32_t kGateClockOff = 1U;
+
+// UIC commands share one doorbell: the arguments are staged, the opcode is
+// written last, and completion arrives as one bit in the interrupt status
+// register. Polling it keeps the call bounded even when nothing is listening.
+constexpr unsigned kUicCommand = 0x90;
+constexpr unsigned kUicArgument2 = 0x94;
+constexpr unsigned kUicArgument3 = 0x98;
+constexpr unsigned kUicResult = 0x9c;
+constexpr uint32_t kUicDone = 1U << 10;
+constexpr uint32_t kDmeLinkStartup = 0x16;
+
 enum ReportIndex : unsigned {
   ReportGdsc, ReportAxi, ReportAhb, ReportTx, ReportRx0, ReportRx1,
   ReportUnipro, ReportIce, ReportAux, ReportAggregate,
@@ -49,21 +80,17 @@ static void write32 (uintptr_t base, unsigned offset, uint32_t value)
   *reinterpret_cast<volatile uint32_t *> (base + offset) = value;
 }
 
-// UIC commands share one doorbell: the arguments are staged, the opcode is
-// written last, and completion arrives as one bit in the interrupt status
-// register. Polling it keeps the call bounded even when nothing is listening.
 static uint32_t uicLinkStartup (uintptr_t host)
 {
-  write32 (host, 0x94, 0);
-  write32 (host, 0x98, 0);
-  write32 (host, 0x9c, 0);
-  write32 (host, 0x20, 1U << 10);            // drop a stale completion
-  write32 (host, 0x90, 0x16);                // DME_LINKSTARTUP
+  write32 (host, kUicArgument2, 0);
+  write32 (host, kUicArgument3, 0);
+  write32 (host, kUicResult, 0);
+  write32 (host, 0x20, kUicDone);            // drop a stale completion
+  write32 (host, kUicCommand, kDmeLinkStartup);
   for (unsigned spin = 0; spin < 20000; ++spin) {
-    uint32_t status = read32 (host, 0x20);
-    if (status & (1U << 10)) {
-      write32 (host, 0x20, 1U << 10);
-      return read32 (host, 0x9c);            // result code in the low byte
+    if (read32 (host, 0x20) & kUicDone) {
+      write32 (host, 0x20, kUicDone);
+      return read32 (host, kUicResult);      // result code in the low byte
     }
     IODelay (10);
   }
@@ -148,40 +175,175 @@ static bool probeFailure (const char *reason, uint64_t detail = 0)
   PongProbeRecord (0, "ufs-registers", PongProbeFail, reason, detail);
   return false;
 }
-}
 
-class NativeUfs : public IOService {
-  OSDeclareDefaultStructors (NativeUfs)
-public:
-  IOService *probe (IOService *, SInt32 *) override;
-  bool start (IOService *) override;
+// ---------------------------------------------------------------- clocks ---
+//
+// Offsets are from upstream gcc-sm8450.c, which also matches qcom,sm8475-gcc.
+// Each gate names the slot its value lands in, so the snapshot and the
+// power-up loop can never disagree about which register is which.
+struct Gate {
+  const char *name;
+  unsigned offset;
+  ReportIndex report;
 };
 
-OSDefineMetaClassAndStructors (NativeUfs, IOService)
+const Gate kClockGates[] = {
+  {"axi", 0x018, ReportAxi},       {"ahb", 0x020, ReportAhb},
+  {"tx", 0x024, ReportTx},         {"rx0", 0x028, ReportRx0},
+  {"rx1", 0x0c0, ReportRx1},       {"unipro", 0x064, ReportUnipro},
+  {"ice", 0x06c, ReportIce},       {"aux", 0x0a4, ReportAux},
+  {"aggr", 0x0d4, ReportAggregate},
+};
 
-IOService *NativeUfs::probe (IOService *provider, SInt32 *score)
+static void sampleClocks (uintptr_t gcc)
 {
-  ++native_ufs_probe_calls;
-  if (!compatible (provider)) return nullptr;
-  native_ufs_matched = 1;
-  if (score) *score = 1000;
-  return IOService::probe (provider, score);
+  pong_ufs_report[ReportGdsc] = read32 (gcc, kGdscOffset);
+  for (const auto &gate : kClockGates)
+    pong_ufs_report[gate.report] = read32 (gcc, gate.offset);
 }
 
-bool NativeUfs::start (IOService *provider)
+// A loader that leaves UFS running hands over live clocks. One that tears the
+// controller down hands over the GDSC collapsed and CLK_OFF set on the gates
+// that feed the host -- which reads back as a window full of zeroes. Fix both
+// here, and judge the result on the re-read state, never on the handover state.
+static void bringUpClocks (uintptr_t gcc)
 {
-  unsigned mode = 0;
-  PE_parse_boot_argn ("native-ufs-probe", &mode, sizeof (mode));
-  native_ufs_probe_requested = mode;
-  unsigned enabled = 1;
-  PE_parse_boot_argn ("native-ufs", &enabled, sizeof (enabled));
-  if (!enabled || !compatible (provider)) return false;
-  IOLog("PONG_UFS BUILD smmu-cap-v2: optional-probe=%u; transport=%s\n", mode,
-        mode == 2 ? "disabled by diagnostic mode" : "read-only");
-  if (mode == 2) PongProbeRecord (0, "ufs-registers", PongProbeRunning, "validate SM8475 DT and read registers");
-  if (!IOService::start (provider)) return probeFailure ("IOService start failed");
-  // Refuse a board description from a different Qualcomm generation.  These
-  // windows are deliberately validated before the first MMIO read.
+  sampleClocks (gcc);
+  IOLog ("PONG_UFS: GCC before gdsc=%08x axi=%08x ahb=%08x aggr=%08x\n",
+         pong_ufs_report[ReportGdsc], pong_ufs_report[ReportAxi],
+         pong_ufs_report[ReportAhb], pong_ufs_report[ReportAggregate]);
+
+  uint32_t gdsc = pong_ufs_report[ReportGdsc];
+  if (!(gdsc & kGdscPowerOn)) {
+    write32 (gcc, kGdscOffset, gdsc & ~kGdscSwCollapse);
+    for (unsigned spin = 0; spin < 1000; ++spin) {
+      if (read32 (gcc, kGdscOffset) & kGdscPowerOn) break;
+      IODelay (10);
+    }
+    IOLog ("PONG_UFS: GDSC collapsed (%08x), power-up -> %08x\n",
+           gdsc, read32 (gcc, kGdscOffset));
+  }
+
+  for (const auto &gate : kClockGates) {
+    uint32_t value = read32 (gcc, gate.offset);
+    if (!(value & kGateClockOff)) continue;
+    write32 (gcc, gate.offset, value & ~kGateClockOff);
+    for (unsigned spin = 0; spin < 1000; ++spin) {
+      if (!(read32 (gcc, gate.offset) & kGateClockOff)) break;
+      IODelay (10);
+    }
+    IOLog ("PONG_UFS: clock %s CLK_OFF cleared %08x -> %08x\n",
+           gate.name, value, read32 (gcc, gate.offset));
+  }
+
+  sampleClocks (gcc);
+}
+
+static bool clocksPowered ()
+{
+  return (pong_ufs_report[ReportGdsc] & kGdscPowerOn) != 0;
+}
+
+static bool clockBusesRunning ()
+{
+  return !(pong_ufs_report[ReportAxi] & kGateClockOff) &&
+         !(pong_ufs_report[ReportAhb] & kGateClockOff) &&
+         !(pong_ufs_report[ReportAggregate] & kGateClockOff);
+}
+
+// ------------------------------------------------------------ controller ---
+//
+// The host window is read as one unit so the snapshot, the log line and the
+// registry properties all describe the same moment.
+struct UfsHost {
+  uintptr_t base;
+  uint32_t capability;
+  uint32_t version;
+  uint32_t interruptStatus;
+  uint32_t status;
+  uint32_t hce;
+
+  void sample ()
+  {
+    capability = read32 (base, 0x00);
+    version = read32 (base, 0x08);
+    interruptStatus = read32 (base, 0x20);
+    status = read32 (base, 0x30);
+    hce = read32 (base, 0x34);
+  }
+
+  // A controller the loader left disabled stops every later step silently, so
+  // the write is read back instead of assumed to have taken.
+  void enableController ()
+  {
+    if (hce & 1U) return;
+    uint32_t before = hce;
+    write32 (base, 0x34, before | 1U);
+    for (unsigned spin = 0; spin < 1000; ++spin) {
+      if (read32 (base, 0x34) & 1U) break;
+      IODelay (10);
+    }
+    hce = read32 (base, 0x34);
+    status = read32 (base, 0x30);
+    IOLog ("PONG_UFS: HCE %08x -> %08x hcs=%08x\n", before, hce, status);
+  }
+
+  // Only worth asking for a link when the controller answers and the device is
+  // not already present: a second startup on a live link throws away a state
+  // the loader may have handed over for free.
+  void requestLink ()
+  {
+    if (!(hce & 1U) || (status & 1U)) return;
+    uint32_t result = uicLinkStartup (base);
+    IOLog ("PONG_UFS: DME_LINKSTARTUP result=%08x hcs=%08x uic=%08x/%08x/%08x\n",
+           result, read32 (base, 0x30), read32 (base, 0x40),
+           read32 (base, 0x44), read32 (base, 0x48));
+    status = read32 (base, 0x30);
+  }
+
+  void publish ()
+  {
+    pong_ufs_report[ReportCapability] = capability;
+    pong_ufs_report[ReportVersion] = version;
+    pong_ufs_report[ReportInterruptStatus] = interruptStatus;
+    pong_ufs_report[ReportHostStatus] = status;
+    pong_ufs_report[ReportHostEnable] = hce;
+  }
+};
+
+// The PHY has its own window. Zeroes there mean the loader powered it down and
+// nobody has programmed it since; a live one lets us leave it alone.
+static void probePhy (uintptr_t phy)
+{
+  if (!phy) return;
+  IOLog ("PONG_UFS: PHY probe serdes=%08x tx=%08x rx=%08x pcs=%08x\n",
+         read32 (phy, 0x00), read32 (phy, 0x400),
+         read32 (phy, 0x800), read32 (phy, 0xc00));
+}
+
+// ------------------------------------------------------------- reporting ---
+
+static void dumpSnapshot (bool powered, bool buses)
+{
+  IOLog ("PONG_UFS READ ONLY\n"
+         "gdsc=%08x axi=%08x ahb=%08x aggr=%08x\n"
+         "tx=%08x rx0=%08x rx1=%08x unipro=%08x\n"
+         "ice=%08x aux=%08x powered=%u buses=%u sid=%x\n"
+         "cap=%08x ver=%08x is=%08x hcs=%08x hce=%08x\n",
+         pong_ufs_report[ReportGdsc], pong_ufs_report[ReportAxi],
+         pong_ufs_report[ReportAhb], pong_ufs_report[ReportAggregate],
+         pong_ufs_report[ReportTx], pong_ufs_report[ReportRx0],
+         pong_ufs_report[ReportRx1], pong_ufs_report[ReportUnipro],
+         pong_ufs_report[ReportIce], pong_ufs_report[ReportAux], powered, buses,
+         pong_ufs_report[ReportStream], pong_ufs_report[ReportCapability],
+         pong_ufs_report[ReportVersion], pong_ufs_report[ReportInterruptStatus],
+         pong_ufs_report[ReportHostStatus], pong_ufs_report[ReportHostEnable]);
+}
+
+// Refuse a board description from a different Qualcomm generation. These
+// windows are deliberately validated before the first MMIO read.
+static bool validateDescription (IOService *provider)
+{
   struct Window { const char *name; uint64_t expected; };
   const Window windows[] = {
     {"pong,ufs-hc-base", kUfsHost}, {"pong,ufs-hc-size", kUfsHostBytes},
@@ -198,7 +360,7 @@ bool NativeUfs::start (IOService *provider)
   }
   struct Cell { const char *name; uint32_t expected; };
   const Cell cells[] = {{"pong,smmu-stream-id", kUfsStreamId}, {"pong,ufs-spi", 265},
-                       {"pong,smmu-context-banks", 78}, {"pong,smmu-match-groups", 120}};
+                        {"pong,smmu-context-banks", 78}, {"pong,smmu-match-groups", 120}};
   for (const auto &cell : cells) {
     OSData *value = OSDynamicCast (OSData, provider->getProperty (cell.name));
     uint32_t observed = 0;
@@ -207,6 +369,71 @@ bool NativeUfs::start (IOService *provider)
     memcpy (&observed, value->getBytesNoCopy (), sizeof (observed));
     if (observed != cell.expected) return probeFailure (cell.name, observed);
   }
+  return true;
+}
+}
+
+class NativeUfs : public IOService {
+  OSDeclareDefaultStructors (NativeUfs)
+public:
+  IOService *probe (IOService *, SInt32 *) override;
+  bool start (IOService *) override;
+
+private:
+  void publishReport (unsigned mode);
+  bool publishDiagnostic ();
+};
+
+OSDefineMetaClassAndStructors (NativeUfs, IOService)
+
+IOService *NativeUfs::probe (IOService *provider, SInt32 *score)
+{
+  ++native_ufs_probe_calls;
+  if (!compatible (provider)) return nullptr;
+  native_ufs_matched = 1;
+  if (score) *score = 1000;
+  return IOService::probe (provider, score);
+}
+
+void NativeUfs::publishReport (unsigned mode)
+{
+  setProperty ("PongProbeOnly", mode == 2);
+  setProperty ("PongUfsStatus", static_cast<unsigned long long> (native_ufs_status), 32);
+  // The snapshot is a volatile array; setProperty copies it into an OSData.
+  uint32_t registers[16];
+  for (unsigned index = 0; index < 16; ++index) registers[index] = pong_ufs_report[index];
+  setProperty ("PongUfsRegisterSnapshot", registers,
+               static_cast<unsigned int> (sizeof (registers)));
+}
+
+bool NativeUfs::publishDiagnostic ()
+{
+  registerService ();
+  IOLog ("PONG_UFS: diagnostic service registered; continue IOKit, no block media published\n");
+  PongProbeRecord (0, "ufs-registers", PongProbePass,
+                   "registers read; diagnostic service published",
+                   pong_ufs_report[ReportVersion]);
+  thread_t thread = nullptr;
+  kern_return_t result = kernel_thread_start (registrationReport, nullptr, &thread);
+  if (result == KERN_SUCCESS) thread_deallocate (thread);
+  else PongProbeRecord (1, "timer-scheduler", PongProbeFail, "observer thread creation failed",
+                        static_cast<uint64_t> (result));
+  return true;
+}
+
+bool NativeUfs::start (IOService *provider)
+{
+  unsigned mode = 0;
+  PE_parse_boot_argn ("native-ufs-probe", &mode, sizeof (mode));
+  native_ufs_probe_requested = mode;
+  unsigned enabled = 1;
+  PE_parse_boot_argn ("native-ufs", &enabled, sizeof (enabled));
+  if (!enabled || !compatible (provider)) return false;
+  IOLog("PONG_UFS BUILD smmu-cap-v2: optional-probe=%u; transport=%s\n", mode,
+        mode == 2 ? "disabled by diagnostic mode" : "read-only");
+  if (mode == 2) PongProbeRecord (0, "ufs-registers", PongProbeRunning, "validate SM8475 DT and read registers");
+  if (!IOService::start (provider)) return probeFailure ("IOService start failed");
+  if (!validateDescription (provider)) return false;
   IOLog ("PONG_UFS: matched SM8475, validate firmware clocks\n");
   native_ufs_status = 1;
 
@@ -215,150 +442,37 @@ bool NativeUfs::start (IOService *provider)
   if (!gcc) return probeFailure ("GCC map failed");
   native_ufs_mapped = 1;
   native_ufs_status = 2;
-
-  // Offsets are from upstream gcc-sm8450.c, which also matches qcom,sm8475-gcc.
-  auto sampleClocks = [&] {
-    pong_ufs_report[ReportGdsc] = read32 (gcc, 0x004);
-    pong_ufs_report[ReportAxi] = read32 (gcc, 0x018);
-    pong_ufs_report[ReportAhb] = read32 (gcc, 0x020);
-    pong_ufs_report[ReportTx] = read32 (gcc, 0x024);
-    pong_ufs_report[ReportRx0] = read32 (gcc, 0x028);
-    pong_ufs_report[ReportRx1] = read32 (gcc, 0x0c0);
-    pong_ufs_report[ReportUnipro] = read32 (gcc, 0x064);
-    pong_ufs_report[ReportIce] = read32 (gcc, 0x06c);
-    pong_ufs_report[ReportAux] = read32 (gcc, 0x0a4);
-    pong_ufs_report[ReportAggregate] = read32 (gcc, 0x0d4);
-  };
-  sampleClocks ();
   pong_ufs_report[ReportStream] = kUfsStreamId;
-  IOLog ("PONG_UFS: GCC before gdsc=%08x axi=%08x ahb=%08x aggr=%08x\n",
-         pong_ufs_report[ReportGdsc], pong_ufs_report[ReportAxi],
-         pong_ufs_report[ReportAhb], pong_ufs_report[ReportAggregate]);
 
-  // A loader that leaves UFS running hands over live clocks. One that tears the
-  // controller down hands over CBCR bit0 (CLK_OFF) set and the GDSC collapsed --
-  // which reads as a host window full of zeroes. Bring both back first, then
-  // judge on the re-read state instead of the handover state.
-  uint32_t gdsc = pong_ufs_report[ReportGdsc];
-  if (!(gdsc & 0x80000000U)) {
-    write32 (gcc, 0x004, gdsc & ~0x40000000U);
-    for (unsigned spin = 0; spin < 1000; ++spin) {
-      if (read32 (gcc, 0x004) & 0x80000000U) break;
-      IODelay (10);
-    }
-    IOLog ("PONG_UFS: GDSC collapsed (%08x), power-up -> %08x\n",
-           gdsc, read32 (gcc, 0x004));
-  }
-  struct Gate { const char *name; unsigned offset; };
-  const Gate gates[] = {
-    {"axi", 0x018}, {"ahb", 0x020}, {"tx", 0x024}, {"rx0", 0x028},
-    {"rx1", 0x0c0}, {"unipro", 0x064}, {"ice", 0x06c}, {"aux", 0x0a4},
-    {"aggr", 0x0d4}
-  };
-  for (const auto &gate : gates) {
-    uint32_t value = read32 (gcc, gate.offset);
-    if (!(value & 1U)) continue;
-    write32 (gcc, gate.offset, value & ~1U);
-    for (unsigned spin = 0; spin < 1000; ++spin) {
-      if (!(read32 (gcc, gate.offset) & 1U)) break;
-      IODelay (10);
-    }
-    IOLog ("PONG_UFS: clock %s CLK_OFF cleared %08x -> %08x\n",
-           gate.name, value, read32 (gcc, gate.offset));
-  }
-  sampleClocks ();
-  bool powered = (pong_ufs_report[ReportGdsc] & 0x80000000U) != 0;
-  // CBCR bit0 is CLK_OFF, so a running gate reads zero there.
-  bool buses = !(pong_ufs_report[ReportAxi] & 1U) &&
-               !(pong_ufs_report[ReportAhb] & 1U) &&
-               !(pong_ufs_report[ReportAggregate] & 1U);
+  bringUpClocks (gcc);
+  bool powered = clocksPowered ();
+  bool buses = clockBusesRunning ();
+
+  UfsHost host = {};
   if (powered && buses) {
     IOLog ("PONG_UFS: clocks active, read host state\n");
-    uintptr_t host = mapPhysical (kUfsHost, kUfsHostBytes, hostMap);
-    if (!host) return probeFailure ("host map failed");
+    host.base = mapPhysical (kUfsHost, kUfsHostBytes, hostMap);
+    if (!host.base) return probeFailure ("host map failed");
     native_ufs_status = 3;
-    pong_ufs_report[ReportCapability] = read32 (host, 0x00);
-    pong_ufs_report[ReportVersion] = read32 (host, 0x08);
-    pong_ufs_report[ReportInterruptStatus] = read32 (host, 0x20);
-    pong_ufs_report[ReportHostStatus] = read32 (host, 0x30);
-    pong_ufs_report[ReportHostEnable] = read32 (host, 0x34);
-
-    // A controller the loader left disabled stops every later step silently, so
-    // bring it up here and report whether the write actually took.
-    uint32_t enable = pong_ufs_report[ReportHostEnable];
-    if (!(enable & 1U)) {
-      write32 (host, 0x34, enable | 1U);
-      for (unsigned spin = 0; spin < 1000; ++spin) {
-        if (read32 (host, 0x34) & 1U) break;
-        IODelay (10);
-      }
-      pong_ufs_report[ReportHostEnable] = read32 (host, 0x34);
-      pong_ufs_report[ReportHostStatus] = read32 (host, 0x30);
-      IOLog ("PONG_UFS: HCE %08x -> %08x hcs=%08x\n", enable,
-             pong_ufs_report[ReportHostEnable], pong_ufs_report[ReportHostStatus]);
-    }
-
-    // The PHY has its own window. Zeroes there mean the loader powered it down
-    // and nobody has programmed it since, which is what the next step must fix;
-    // a live one lets us leave it alone.
-    uintptr_t phy = mapPhysical (kUfsPhyPage, 0x1000, phyMap);
-    if (phy) {
-      IOLog ("PONG_UFS: PHY probe serdes=%08x tx=%08x rx=%08x pcs=%08x\n",
-             read32 (phy, 0x00), read32 (phy, 0x400),
-             read32 (phy, 0x800), read32 (phy, 0xc00));
-    }
-
-    // Only worth asking for a link when the controller answers, and only when
-    // the device is not already present: a repeated startup on a live link
-    // throws away a state the loader may have handed us for free.
-    if ((pong_ufs_report[ReportHostEnable] & 1U) &&
-        !(pong_ufs_report[ReportHostStatus] & 1U)) {
-      uint32_t result = uicLinkStartup (host);
-      IOLog ("PONG_UFS: DME_LINKSTARTUP result=%08x hcs=%08x uic=%08x/%08x/%08x\n",
-             result, read32 (host, 0x30), read32 (host, 0x40),
-             read32 (host, 0x44), read32 (host, 0x48));
-      pong_ufs_report[ReportHostStatus] = read32 (host, 0x30);
-    }
+    host.sample ();
+    host.enableController ();
+    probePhy (mapPhysical (kUfsPhyPage, 0x1000, phyMap));
+    host.requestLink ();
+    host.publish ();
     native_ufs_status = 4;
   }
 
-  IOLog ("PONG_UFS READ ONLY\n"
-         "gdsc=%08x axi=%08x ahb=%08x aggr=%08x\n"
-         "tx=%08x rx0=%08x rx1=%08x unipro=%08x\n"
-         "ice=%08x aux=%08x powered=%u buses=%u sid=%x\n"
-         "cap=%08x ver=%08x is=%08x hcs=%08x hce=%08x\n",
-         pong_ufs_report[ReportGdsc], pong_ufs_report[ReportAxi],
-         pong_ufs_report[ReportAhb], pong_ufs_report[ReportAggregate],
-         pong_ufs_report[ReportTx], pong_ufs_report[ReportRx0],
-         pong_ufs_report[ReportRx1], pong_ufs_report[ReportUnipro],
-         pong_ufs_report[ReportIce], pong_ufs_report[ReportAux], powered, buses,
-         pong_ufs_report[ReportStream], pong_ufs_report[ReportCapability],
-         pong_ufs_report[ReportVersion], pong_ufs_report[ReportInterruptStatus],
-         pong_ufs_report[ReportHostStatus], pong_ufs_report[ReportHostEnable]);
-  if (!powered || !buses) return probeFailure ("power/clocks unavailable; host access skipped");
-  if (!pong_ufs_report[ReportVersion] || pong_ufs_report[ReportVersion] == 0xffffffffU ||
-      !(pong_ufs_report[ReportHostEnable] & 1U))
-    return probeFailure ("host disabled or invalid version", pong_ufs_report[ReportHostEnable]);
-  setProperty ("PongProbeOnly", mode == 2);
-  setProperty ("PongUfsStatus", static_cast<unsigned long long> (native_ufs_status), 32);
-  uint32_t registers[16];
-  for (unsigned index = 0; index < 16; ++index) registers[index] = pong_ufs_report[index];
-  OSData *registerSnapshot = OSData::withBytes (registers, sizeof (registers));
-  if (registerSnapshot) {
-    setProperty ("PongUfsRegisterSnapshot", registerSnapshot);
-    registerSnapshot->release ();
-  }
+  dumpSnapshot (powered, buses);
+  if (!powered || !buses)
+    return probeFailure ("power/clocks unavailable; host access skipped");
+  if (!host.version || host.version == 0xffffffffU || !(host.hce & 1U))
+    return probeFailure ("host disabled or invalid version", host.hce);
+
+  publishReport (mode);
   if (mode != 2) {
-    if (!pong_ufs_transport_start(this)) return false;
-    registerService();
+    if (!pong_ufs_transport_start (this)) return false;
+    registerService ();
     return true;
   }
-  registerService ();
-  IOLog ("PONG_UFS: diagnostic service registered; continue IOKit, no block media published\n");
-  PongProbeRecord (0, "ufs-registers", PongProbePass, "registers read; diagnostic service published", pong_ufs_report[ReportVersion]);
-  thread_t thread = nullptr;
-  kern_return_t result = kernel_thread_start (registrationReport, nullptr, &thread);
-  if (result == KERN_SUCCESS) thread_deallocate (thread);
-  else PongProbeRecord (1, "timer-scheduler", PongProbeFail, "observer thread creation failed", result);
-  return true;
+  return publishDiagnostic ();
 }
