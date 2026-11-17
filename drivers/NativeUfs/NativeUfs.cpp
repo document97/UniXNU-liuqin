@@ -9,6 +9,7 @@
 //   bringUpClocks         are the UFS clocks running, and can we fix them?
 //   UfsHost::sample       is the controller answering at all?
 //   UfsHost::enableController  did the loader leave it disabled?
+//   UfsHost::resetController   did the loader leave a dirty UIC state behind?
 //   probePhy              did the loader leave the PHY powered?
 //   UfsHost::requestLink  is there a device on the other side of the link?
 //
@@ -370,29 +371,61 @@ struct UfsHost {
     IOLog ("PONG_UFS: HCE %08x -> %08x hcs=%08x\n", before, hce, status);
   }
 
+  // HCE=1 on entry is not a clean enable. The loader's UIC state machine,
+  // link and request lists survive in whatever state it abandoned them, and
+  // DME_LINKSTARTUP then fails on that dirty state (result=1, dl=2 replay
+  // timeout, UE latched again). Cycle HCE so the controller, UIC and queues
+  // rebuild from scratch. GCC clocks and the QMP PHY sit outside the host
+  // block and are not disturbed by this reset.
+  void resetController ()
+  {
+    uint32_t before = read32 (base, 0x34);
+    if (!(before & 1U)) return;                 // enableController covers that case
+    write32 (base, 0x34, before & ~1U);         // HCE 0: disable / internal reset
+    for (unsigned spin = 0; spin < 1000 && (read32 (base, 0x34) & 1U); ++spin)
+      IODelay (10);
+    IODelay (1000);                             // let the reset settle
+    uint32_t cur = read32 (base, 0x34);
+    write32 (base, 0x34, (cur & ~1U) | 1U);     // HCE 1: clean re-enable
+    for (unsigned spin = 0; spin < 1000 && !(read32 (base, 0x34) & 1U); ++spin)
+      IODelay (10);
+    for (unsigned spin = 0; spin < 1000 && !(read32 (base, 0x30) & kHcsUicReady); ++spin)
+      IODelay (10);
+    hce = read32 (base, 0x34);
+    status = read32 (base, 0x30);
+    IOLog ("PONG_UFS: HCE reset %08x -> %08x hcs=%08x\n", before, hce, status);
+  }
+
   // A handover can leave the device marked present while the link is dead. The
   // loader pulls the clocks and the block reset on its way out, the UniPro layer
   // latches a data-link error, and HCS keeps reporting DP=1 because nothing
   // clears it -- so presence alone is not proof that a command will ever reach
   // the device. A latched UIC error is: clear it and bring the link up again
   // instead of trusting the handover.
-  void requestLink ()
+  void requestLink (bool forceStartup)
   {
     if (!(hce & 1U)) return;
     uint32_t latched = read32 (base, kInterruptStatus) & kIsUicError;
     uint32_t dataLink = read32 (base, kUicErrorDataLink);
     bool degraded = latched || dataLink;
-    if ((status & kHcsDevicePresent) && !degraded) return;
-    if (degraded) write32 (base, kInterruptStatus, kIsUicError);
-    for (unsigned spin = 0; spin < 1000 && !(read32 (base, 0x30) & kHcsUicReady); ++spin)
-      IODelay (10);
-    uint32_t result = uicLinkStartup (base);
+    if (!forceStartup && (status & kHcsDevicePresent) && !degraded) return;
+    uint32_t result = 0xffffffffU;
+    unsigned tries = 0;
+    for (unsigned attempt = 1; attempt <= 3; ++attempt) {
+      tries = attempt;
+      if (degraded) write32 (base, kInterruptStatus, kIsUicError);
+      for (unsigned spin = 0; spin < 1000 && !(read32 (base, 0x30) & kHcsUicReady); ++spin)
+        IODelay (10);
+      result = uicLinkStartup (base);
+      if (!result) break;
+      IODelay (1000);
+    }
     for (unsigned spin = 0; spin < 1000 && !(read32 (base, 0x30) & kHcsDevicePresent); ++spin)
       IODelay (10);
-    IOLog ("PONG_UFS: DME_LINKSTARTUP(%s) result=%08x hcs=%08x dl=%08x->%08x ue=%08x\n",
+    IOLog ("PONG_UFS: DME_LINKSTARTUP(%s) result=%08x hcs=%08x dl=%08x->%08x ue=%08x tries=%u\n",
            degraded ? "recover" : "absent", result, read32 (base, 0x30),
            dataLink, read32 (base, kUicErrorDataLink),
-           read32 (base, kInterruptStatus) & kIsUicError);
+           read32 (base, kInterruptStatus) & kIsUicError, tries);
     status = read32 (base, 0x30);
     interruptStatus = read32 (base, kInterruptStatus);
   }
@@ -560,8 +593,9 @@ bool NativeUfs::start (IOService *provider)
     native_ufs_status = 3;
     host.sample ();
     host.enableController ();
+    host.resetController ();
     probePhy (mapPhysical (kUfsPhyPage, kUfsPhyBytes, phyMap));
-    host.requestLink ();
+    host.requestLink (true);
     host.publish ();
     native_ufs_status = 4;
   }
