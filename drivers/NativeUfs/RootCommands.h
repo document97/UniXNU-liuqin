@@ -79,7 +79,10 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
   cacheCivac (gHost.virt, 64);
   cacheCivac (gHost.virt + kUcdOffset, kPrdtOffset + 16);
   if (dataBytes) cacheCivac (gHost.virt + kDataOffset, dataBytes);
-  hostWrite (0x20, 1);  // Acknowledge completion only; preserve error evidence.
+  // Clear the transfer-done bit and the latched UIC error (IS bit2). A
+  // handover leaves UE set; while it is latched the controller refuses to
+  // consume the request doorbell, so every command times out with DB=1.
+  hostWrite (0x20, 1 | 4);
   HardwareTransferPort port;
   clock_interval_to_deadline (timeoutUs, kMicrosecondScale, &port.deadline);
   hostWrite (0x58, 1);
