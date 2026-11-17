@@ -26,6 +26,10 @@ namespace {
 constexpr uint64_t kGccUfsPage = 0x00187000ULL;
 constexpr uint64_t kUfsHost = 0x01d84000ULL;
 constexpr uint64_t kUfsHostBytes = 0x3000ULL;
+// The QMP PHY sits one page above the host controller on this SoC. Its first
+// register group answers only while the PHY is powered, so a read of it is the
+// cheapest way to tell a live handover from one the loader tore down.
+constexpr uint64_t kUfsPhyPage = 0x01d87000ULL;
 constexpr uint32_t kUfsStreamId = 0xe0;
 
 enum ReportIndex : unsigned {
@@ -43,6 +47,27 @@ static uint32_t read32 (uintptr_t base, unsigned offset)
 static void write32 (uintptr_t base, unsigned offset, uint32_t value)
 {
   *reinterpret_cast<volatile uint32_t *> (base + offset) = value;
+}
+
+// UIC commands share one doorbell: the arguments are staged, the opcode is
+// written last, and completion arrives as one bit in the interrupt status
+// register. Polling it keeps the call bounded even when nothing is listening.
+static uint32_t uicLinkStartup (uintptr_t host)
+{
+  write32 (host, 0x94, 0);
+  write32 (host, 0x98, 0);
+  write32 (host, 0x9c, 0);
+  write32 (host, 0x20, 1U << 10);            // drop a stale completion
+  write32 (host, 0x90, 0x16);                // DME_LINKSTARTUP
+  for (unsigned spin = 0; spin < 20000; ++spin) {
+    uint32_t status = read32 (host, 0x20);
+    if (status & (1U << 10)) {
+      write32 (host, 0x20, 1U << 10);
+      return read32 (host, 0x9c);            // result code in the low byte
+    }
+    IODelay (10);
+  }
+  return 0xffffffffU;                        // never completed
 }
 
 static bool contains (const char *data, size_t length, const char *needle)
@@ -185,7 +210,7 @@ bool NativeUfs::start (IOService *provider)
   IOLog ("PONG_UFS: matched SM8475, validate firmware clocks\n");
   native_ufs_status = 1;
 
-  OSSharedPtr<IOMemoryMap> gccMap, hostMap;
+  OSSharedPtr<IOMemoryMap> gccMap, hostMap, phyMap;
   uintptr_t gcc = mapPhysical (kGccUfsPage, 0x1000, gccMap);
   if (!gcc) return probeFailure ("GCC map failed");
   native_ufs_mapped = 1;
@@ -257,6 +282,43 @@ bool NativeUfs::start (IOService *provider)
     pong_ufs_report[ReportInterruptStatus] = read32 (host, 0x20);
     pong_ufs_report[ReportHostStatus] = read32 (host, 0x30);
     pong_ufs_report[ReportHostEnable] = read32 (host, 0x34);
+
+    // A controller the loader left disabled stops every later step silently, so
+    // bring it up here and report whether the write actually took.
+    uint32_t enable = pong_ufs_report[ReportHostEnable];
+    if (!(enable & 1U)) {
+      write32 (host, 0x34, enable | 1U);
+      for (unsigned spin = 0; spin < 1000; ++spin) {
+        if (read32 (host, 0x34) & 1U) break;
+        IODelay (10);
+      }
+      pong_ufs_report[ReportHostEnable] = read32 (host, 0x34);
+      pong_ufs_report[ReportHostStatus] = read32 (host, 0x30);
+      IOLog ("PONG_UFS: HCE %08x -> %08x hcs=%08x\n", enable,
+             pong_ufs_report[ReportHostEnable], pong_ufs_report[ReportHostStatus]);
+    }
+
+    // The PHY has its own window. Zeroes there mean the loader powered it down
+    // and nobody has programmed it since, which is what the next step must fix;
+    // a live one lets us leave it alone.
+    uintptr_t phy = mapPhysical (kUfsPhyPage, 0x1000, phyMap);
+    if (phy) {
+      IOLog ("PONG_UFS: PHY probe serdes=%08x tx=%08x rx=%08x pcs=%08x\n",
+             read32 (phy, 0x00), read32 (phy, 0x400),
+             read32 (phy, 0x800), read32 (phy, 0xc00));
+    }
+
+    // Only worth asking for a link when the controller answers, and only when
+    // the device is not already present: a repeated startup on a live link
+    // throws away a state the loader may have handed us for free.
+    if ((pong_ufs_report[ReportHostEnable] & 1U) &&
+        !(pong_ufs_report[ReportHostStatus] & 1U)) {
+      uint32_t result = uicLinkStartup (host);
+      IOLog ("PONG_UFS: DME_LINKSTARTUP result=%08x hcs=%08x uic=%08x/%08x/%08x\n",
+             result, read32 (host, 0x30), read32 (host, 0x40),
+             read32 (host, 0x44), read32 (host, 0x48));
+      pong_ufs_report[ReportHostStatus] = read32 (host, 0x30);
+    }
     native_ufs_status = 4;
   }
 
