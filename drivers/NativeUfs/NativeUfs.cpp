@@ -40,10 +40,22 @@ namespace {
 constexpr uint64_t kGccUfsPage = 0x00187000ULL;
 constexpr uint64_t kUfsHost = 0x01d84000ULL;
 constexpr uint64_t kUfsHostBytes = 0x3000ULL;
-// The QMP PHY sits one page above the host controller on this SoC. Its first
-// register group answers only while the PHY is powered, so a read of it is the
-// cheapest way to tell a live handover from one the loader tore down.
+// The QMP PHY sits one page above the host controller on this SoC, and it is
+// laid out in v6 groups: serdes at 0, PCS at 0x400, TX at 0x1000, RX at 0x1200.
+// SM8475 selects qmp_ufs_offsets_v6, so the older 0x400/0x600/0xc00 grouping
+// names the wrong blocks -- 0x400 is PCS, not TX. The window has to cover RX.
 constexpr uint64_t kUfsPhyPage = 0x01d87000ULL;
+constexpr uint64_t kUfsPhyBytes = 0x2000ULL;
+constexpr unsigned kPhySerdes = 0x000;
+constexpr unsigned kPhyPcs = 0x400;
+constexpr unsigned kPhyTx = 0x1000;
+constexpr unsigned kPhyRx = 0x1200;
+// PCS registers, offsets relative to kPhyPcs (phy-qcom-qmp-pcs-ufs-v6.h).
+constexpr unsigned kPcsStart = 0x000;
+constexpr unsigned kPcsPowerDown = 0x004;
+constexpr unsigned kPcsSwReset = 0x008;
+constexpr unsigned kPcsReady = 0x1a8;
+constexpr uint32_t kPcsReadyBit = 1U << 0;
 constexpr uint32_t kUfsStreamId = 0xe0;
 
 // GDSC: bit31 is PWR_ON, bit30 is SW_COLLAPSE. CBCR bit0 is CLK_OFF, so a gate
@@ -56,10 +68,12 @@ constexpr uint32_t kGateClockOff = 1U;
 // UIC commands share one doorbell: the arguments are staged, the opcode is
 // written last, and completion arrives as one bit in the interrupt status
 // register. Polling it keeps the call bounded even when nothing is listening.
+// Arguments are named after the UFSHCI registers they live in: the result code
+// comes back in ARG_2 and the DME attribute value in ARG_3.
 constexpr unsigned kUicCommand = 0x90;
-constexpr unsigned kUicArgument2 = 0x94;
-constexpr unsigned kUicArgument3 = 0x98;
-constexpr unsigned kUicResult = 0x9c;
+constexpr unsigned kUicArg1 = 0x94;
+constexpr unsigned kUicArg2 = 0x98;
+constexpr unsigned kUicArg3 = 0x9c;
 constexpr uint32_t kUicDone = 1U << 10;
 constexpr uint32_t kDmeLinkStartup = 0x16;
 
@@ -82,15 +96,15 @@ static void write32 (uintptr_t base, unsigned offset, uint32_t value)
 
 static uint32_t uicLinkStartup (uintptr_t host)
 {
-  write32 (host, kUicArgument2, 0);
-  write32 (host, kUicArgument3, 0);
-  write32 (host, kUicResult, 0);
+  write32 (host, kUicArg1, 0);
+  write32 (host, kUicArg2, 0);
+  write32 (host, kUicArg3, 0);
   write32 (host, 0x20, kUicDone);            // drop a stale completion
   write32 (host, kUicCommand, kDmeLinkStartup);
   for (unsigned spin = 0; spin < 20000; ++spin) {
     if (read32 (host, 0x20) & kUicDone) {
       write32 (host, 0x20, kUicDone);
-      return read32 (host, kUicResult);      // result code in the low byte
+      return read32 (host, kUicArg2);        // result code in the low byte
     }
     IODelay (10);
   }
@@ -311,14 +325,21 @@ struct UfsHost {
   }
 };
 
-// The PHY has its own window. Zeroes there mean the loader powered it down and
-// nobody has programmed it since; a live one lets us leave it alone.
+// The PHY answers three different questions from three places: the PCS start
+// and power-down controls say whether anyone ever programmed it, READY_STATUS
+// says whether a clock is actually running through it, and the TX/RX blocks say
+// whether the lane tables were loaded. Zeroes in the first pair mean the next
+// step has to program the PHY from scratch rather than nudge a live one.
 static void probePhy (uintptr_t phy)
 {
   if (!phy) return;
-  IOLog ("PONG_UFS: PHY probe serdes=%08x tx=%08x rx=%08x pcs=%08x\n",
-         read32 (phy, 0x00), read32 (phy, 0x400),
-         read32 (phy, 0x800), read32 (phy, 0xc00));
+  uint32_t ready = read32 (phy, kPhyPcs + kPcsReady);
+  IOLog ("PONG_UFS: PHY start=%08x pwrdn=%08x reset=%08x ready=%08x(%s)\n",
+         read32 (phy, kPhyPcs + kPcsStart), read32 (phy, kPhyPcs + kPcsPowerDown),
+         read32 (phy, kPhyPcs + kPcsSwReset), ready,
+         (ready & kPcsReadyBit) ? "ready" : "not ready");
+  IOLog ("PONG_UFS: PHY serdes=%08x tx=%08x rx=%08x\n",
+         read32 (phy, kPhySerdes), read32 (phy, kPhyTx), read32 (phy, kPhyRx));
 }
 
 // ------------------------------------------------------------- reporting ---
@@ -456,7 +477,7 @@ bool NativeUfs::start (IOService *provider)
     native_ufs_status = 3;
     host.sample ();
     host.enableController ();
-    probePhy (mapPhysical (kUfsPhyPage, 0x1000, phyMap));
+    probePhy (mapPhysical (kUfsPhyPage, kUfsPhyBytes, phyMap));
     host.requestLink ();
     host.publish ();
     native_ufs_status = 4;
