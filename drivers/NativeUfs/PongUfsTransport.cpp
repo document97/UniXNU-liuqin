@@ -181,28 +181,13 @@ static bool hostBringUp() {
     lease.held = pong_smmu_lease_lock();
     if (!lease.held) return transportFailure("Apps SMMU lease unavailable");
   }
-  gRootDiagnostic.stage = "SMMU plan";
-  gHost.smmu = mapPhys(0x15000000, 0x100000, gHost.smmuMap);
-  if (!gHost.smmu) return transportFailure("SMMU map");
-  auto read = [](unsigned offset) { return read32(gHost.smmu, offset); };
-  UfsSmmuPlan plan = planUfsSmmu(0xe0, gHost.phys, kDmaBytes, read, 78, 120);
-  gRootDiagnostic.smmuId1 = read(0x24); gRootDiagnostic.smmuId2 = read(0x28);
-  gRootDiagnostic.smmuSlot = plan.slot; gRootDiagnostic.smr = plan.smr; gRootDiagnostic.s2cr = plan.s2cr;
-  unsigned rawBanks = gRootDiagnostic.smmuId1 & 255, rawGroups = read(0x20) & 255;
-  IOLog("PONG_UFS: SMMU id0=%08x id1=%08x id2=%08x HW banks=%u groups=%u effective banks=%u groups=%u\n",
-        read(0x20), gRootDiagnostic.smmuId1, gRootDiagnostic.smmuId2, rawBanks, rawGroups,
-        rawBanks < 78 ? rawBanks : 78, rawGroups < 120 ? rawGroups : 120);
-  if (plan.error) return transportFailure(plan.error);
-  IOLog("PONG_UFS: SID e0 slot=%u firmware-bank=%u target-bank=%u action=%s\n",
-        plan.slot, plan.previousBank, plan.bank,
-        plan.migrate ? "migrate exact firmware mapping" : plan.reuse ? "reuse bypass" : "install exact mapping");
-  gHost.cb = gHost.smmu + (plan.pages + plan.bank) * 4096;
-  gRootDiagnostic.stage = "SMMU stream configuration";
-  why = configureUfsSmmu(plan, 0xe0, read, [](unsigned offset, uint32_t value) { write32(gHost.smmu, offset, value); });
-  gRootDiagnostic.smr = read(0x800 + 4 * plan.slot); gRootDiagnostic.s2cr = read(0xc00 + 4 * plan.slot);
-  gRootDiagnostic.cbar = read(0x1000 + 4 * plan.bank); gRootDiagnostic.cba2r = read(0x1800 + 4 * plan.bank);
-  gRootDiagnostic.sctlr = read32(gHost.cb, 0);
-  if (why) return transportFailure(why);
+  // Keep the loader SMMU handover mapping exactly as it was left. The
+  // loader itself reads the whole GPT with SID e0 still bound to the
+  // firmware bank and the queue in physical passthrough. Re-pointing SID
+  // e0 at a freshly programmed bank is the one thing that working path
+  // never does, so leave the global SMMU table untouched and rely on the
+  // mapping firmware established.
+  IOLog ("PONG_UFS: SMMU handover mapping left untouched (no reprogram)\n");
   } // Release before queue commands or storage readiness notifications.
   gRootDiagnostic.stage = "request list start";
   if (!hostStartQueue(&why)) return transportFailure(why);
