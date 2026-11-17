@@ -60,11 +60,22 @@ constexpr uint32_t kPcsReadyBit = 1U << 0;
 constexpr uint32_t kUfsStreamId = 0xe0;
 
 // GDSC: bit31 is PWR_ON, bit30 is SW_COLLAPSE. CBCR bit0 is CLK_OFF, so a gate
-// that is running reads zero there.
+// that is running reads zero there. The same page holds the block reset the
+// board description gives the controller (GCC_UFS_PHY_BCR, 0x87000); while it
+// is asserted the whole host window ignores writes.
 constexpr unsigned kGdscOffset = 0x004;
 constexpr uint32_t kGdscPowerOn = 1U << 31;
 constexpr uint32_t kGdscSwCollapse = 1U << 30;
 constexpr uint32_t kGateClockOff = 1U;
+constexpr unsigned kBcrOffset = 0x000;
+constexpr uint32_t kBcrAsserted = 1U;
+
+// The PHY reference clock lives in a different GCC page (0x9c000) than the
+// controller's clock gates, and no UFS gate covers it. Without it the PHY PLL
+// never locks, so READY stays low however the rest of the sequence is ordered.
+constexpr uint64_t kUfsClkrefPage = 0x0019c000ULL;
+constexpr uint64_t kUfsClkrefBytes = 0x1000ULL;
+constexpr unsigned kUfsClkrefOffset = 0x000;
 
 // UIC commands share one doorbell: the arguments are staged, the opcode is
 // written last, and completion arrives as one bit in the interrupt status
@@ -217,12 +228,59 @@ static void sampleClocks (uintptr_t gcc)
     pong_ufs_report[gate.report] = read32 (gcc, gate.offset);
 }
 
+// Same CBCR semantic as the gates below: bit0 is CLK_OFF, so clearing it turns
+// the reference clock on. gcc_ufs_0_clkref_en uses clk_branch2_ops with
+// halt_check BRANCH_HALT, so the bit coming back as zero is the whole proof.
+static void bringUpReferenceClock (uintptr_t clkref)
+{
+  if (!clkref) {
+    IOLog ("PONG_UFS: reference clock page not mapped\n");
+    return;
+  }
+  uint32_t value = read32 (clkref, kUfsClkrefOffset);
+  if (!(value & kGateClockOff)) {
+    IOLog ("PONG_UFS: reference clock already on %08x\n", value);
+    return;
+  }
+  write32 (clkref, kUfsClkrefOffset, value & ~kGateClockOff);
+  for (unsigned spin = 0; spin < 1000; ++spin) {
+    if (!(read32 (clkref, kUfsClkrefOffset) & kGateClockOff)) break;
+    IODelay (10);
+  }
+  IOLog ("PONG_UFS: reference clock CLK_OFF cleared %08x -> %08x\n",
+         value, read32 (clkref, kUfsClkrefOffset));
+}
+
+// GCC_UFS_PHY_BCR (gcc-sm8450.c reset map, 0x87000 bit0) is the block reset the
+// board description hands the controller. While it is asserted the block reads
+// back as zero throughout -- collapsed GDSC, every gate "off" -- which is
+// indistinguishable from a controller the loader tore down. So it is read and
+// reported first, and released before any state below is judged.
+static void releaseBlockReset (uintptr_t gcc)
+{
+  uint32_t bcr = read32 (gcc, kBcrOffset);
+  if (!(bcr & kBcrAsserted)) {
+    IOLog ("PONG_UFS: BCR already released %08x\n", bcr);
+    return;
+  }
+  write32 (gcc, kBcrOffset, bcr & ~kBcrAsserted);
+  for (unsigned spin = 0; spin < 1000; ++spin) {
+    if (!(read32 (gcc, kBcrOffset) & kBcrAsserted)) break;
+    IODelay (10);
+  }
+  IOLog ("PONG_UFS: BCR was asserted %08x -> %08x\n", bcr, read32 (gcc, kBcrOffset));
+}
+
 // A loader that leaves UFS running hands over live clocks. One that tears the
 // controller down hands over the GDSC collapsed and CLK_OFF set on the gates
 // that feed the host -- which reads back as a window full of zeroes. Fix both
 // here, and judge the result on the re-read state, never on the handover state.
-static void bringUpClocks (uintptr_t gcc)
+static void bringUpClocks (uintptr_t gcc, uintptr_t clkref)
 {
+  // The PHY multiplies this reference into its own PLL; without it READY never
+  // rises no matter how the rest of the sequence is ordered, so it goes first.
+  bringUpReferenceClock (clkref);
+  releaseBlockReset (gcc);
   sampleClocks (gcc);
   IOLog ("PONG_UFS: GCC before gdsc=%08x axi=%08x ahb=%08x aggr=%08x\n",
          pong_ufs_report[ReportGdsc], pong_ufs_report[ReportAxi],
@@ -459,14 +517,15 @@ bool NativeUfs::start (IOService *provider)
   IOLog ("PONG_UFS: matched SM8475, validate firmware clocks\n");
   native_ufs_status = 1;
 
-  OSSharedPtr<IOMemoryMap> gccMap, hostMap, phyMap;
+  OSSharedPtr<IOMemoryMap> gccMap, clkrefMap, hostMap, phyMap;
   uintptr_t gcc = mapPhysical (kGccUfsPage, 0x1000, gccMap);
   if (!gcc) return probeFailure ("GCC map failed");
+  uintptr_t clkref = mapPhysical (kUfsClkrefPage, kUfsClkrefBytes, clkrefMap);
   native_ufs_mapped = 1;
   native_ufs_status = 2;
   pong_ufs_report[ReportStream] = kUfsStreamId;
 
-  bringUpClocks (gcc);
+  bringUpClocks (gcc, clkref);
   bool powered = clocksPowered ();
   bool buses = clockBusesRunning ();
 
