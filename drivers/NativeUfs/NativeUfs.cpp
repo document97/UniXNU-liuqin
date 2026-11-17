@@ -217,7 +217,7 @@ bool NativeUfs::start (IOService *provider)
   native_ufs_status = 2;
 
   // Offsets are from upstream gcc-sm8450.c, which also matches qcom,sm8475-gcc.
-  auto snapshot = [&] {
+  auto sampleClocks = [&] {
     pong_ufs_report[ReportGdsc] = read32 (gcc, 0x004);
     pong_ufs_report[ReportAxi] = read32 (gcc, 0x018);
     pong_ufs_report[ReportAhb] = read32 (gcc, 0x020);
@@ -229,7 +229,7 @@ bool NativeUfs::start (IOService *provider)
     pong_ufs_report[ReportAux] = read32 (gcc, 0x0a4);
     pong_ufs_report[ReportAggregate] = read32 (gcc, 0x0d4);
   };
-  snapshot ();
+  sampleClocks ();
   pong_ufs_report[ReportStream] = kUfsStreamId;
   IOLog ("PONG_UFS: GCC before gdsc=%08x axi=%08x ahb=%08x aggr=%08x\n",
          pong_ufs_report[ReportGdsc], pong_ufs_report[ReportAxi],
@@ -266,7 +266,7 @@ bool NativeUfs::start (IOService *provider)
     IOLog ("PONG_UFS: clock %s CLK_OFF cleared %08x -> %08x\n",
            gate.name, value, read32 (gcc, gate.offset));
   }
-  snapshot ();
+  sampleClocks ();
   bool powered = (pong_ufs_report[ReportGdsc] & 0x80000000U) != 0;
   // CBCR bit0 is CLK_OFF, so a running gate reads zero there.
   bool buses = !(pong_ufs_report[ReportAxi] & 1U) &&
@@ -341,9 +341,13 @@ bool NativeUfs::start (IOService *provider)
     return probeFailure ("host disabled or invalid version", pong_ufs_report[ReportHostEnable]);
   setProperty ("PongProbeOnly", mode == 2);
   setProperty ("PongUfsStatus", static_cast<unsigned long long> (native_ufs_status), 32);
-  uint32_t snapshot[16];
-  for (unsigned index = 0; index < 16; ++index) snapshot[index] = pong_ufs_report[index];
-  setProperty ("PongUfsRegisterSnapshot", snapshot, sizeof (snapshot));
+  uint32_t registers[16];
+  for (unsigned index = 0; index < 16; ++index) registers[index] = pong_ufs_report[index];
+  OSData *registerSnapshot = OSData::withBytes (registers, sizeof (registers));
+  if (registerSnapshot) {
+    setProperty ("PongUfsRegisterSnapshot", registerSnapshot);
+    registerSnapshot->release ();
+  }
   if (mode != 2) {
     if (!pong_ufs_transport_start(this)) return false;
     registerService();
