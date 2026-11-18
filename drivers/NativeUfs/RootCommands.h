@@ -60,7 +60,7 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
   for (unsigned index = 0; index < 8; index++) {
     words[index] = 0;
   }
-  words[0] = 0x10000000U | (direction << 25);
+  words[0] = 0x10000000U | (direction << 25) | (1U << 24);  /* I: completion interrupt; match shim test_ufs */
   words[2] = 0x0fU;
   words[4] = static_cast<uint32_t> (ucdPhys);
   words[5] = static_cast<uint32_t> (ucdPhys >> 32);
@@ -85,7 +85,9 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
   hostWrite (0x20, 1 | 4);
   HardwareTransferPort port;
   clock_interval_to_deadline (timeoutUs, kMicrosecondScale, &port.deadline);
+  __asm__ volatile("dsb sy" ::: "memory");
   hostWrite (0x58, 1);
+  __asm__ volatile("dsb sy" ::: "memory");
   UfsTransferPoll state;
   UfsTransferEnd end = pollUfsTransfer (port, state);
   gRootDiagnostic.polls = state.polls;
