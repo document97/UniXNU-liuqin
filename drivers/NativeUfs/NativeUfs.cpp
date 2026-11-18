@@ -383,7 +383,16 @@ struct UfsHost {
     uint32_t dataLink = read32 (base, kUicErrorDataLink);
     bool degraded = latched || dataLink;
     if ((status & kHcsDevicePresent) && !degraded) return;
-    if (degraded) write32 (base, kInterruptStatus, kIsUicError);
+    if (degraded) {
+      // IS.UE is re-latched by a live UIC error source. Clearing only the
+      // summary bit leaves UECDL (replay timeout) armed, so LINKSTARTUP
+      // fails and the controller keeps refusing the request doorbell.
+      // UECPA/UECDL/UECN/UECT/UECDME are write-one-to-clear; write back
+      // exactly what was read so no concurrent error is acknowledged.
+      for (unsigned offset = 0x38; offset <= 0x48; offset += 4)
+        write32 (base, offset, read32 (base, offset));
+      write32 (base, kInterruptStatus, kIsUicError);
+    }
     for (unsigned spin = 0; spin < 1000 && !(read32 (base, 0x30) & kHcsUicReady); ++spin)
       IODelay (10);
     uint32_t result = uicLinkStartup (base);

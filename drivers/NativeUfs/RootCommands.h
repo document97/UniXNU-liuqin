@@ -82,6 +82,11 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
   // Clear the transfer-done bit and the latched UIC error (IS bit2). A
   // handover leaves UE set; while it is latched the controller refuses to
   // consume the request doorbell, so every command times out with DB=1.
+  // Clear every UIC error source before the IS summary bit: a latched
+  // source reasserts IS.UE at once and the controller refuses the
+  // doorbell. Write-one-to-clear, so write back exactly what was read.
+  for (unsigned offset = 0x38; offset <= 0x48; offset += 4)
+    hostWrite (offset, read32 (gHost.hc, offset));
   hostWrite (0x20, 1 | 4);
   HardwareTransferPort port;
   clock_interval_to_deadline (timeoutUs, kMicrosecondScale, &port.deadline);
