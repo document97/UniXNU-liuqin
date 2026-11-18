@@ -188,11 +188,45 @@ static bool hostBringUp() {
   // never does, so leave the global SMMU table untouched and rely on the
   // mapping firmware established.
   IOLog ("PONG_UFS: SMMU handover mapping left untouched (no reprogram)\n");
+  // Read-only diagnostic: the previous SMMU snapshot was dead code
+  // (gHost.smmu/cb were never assigned), so SMMU was never truly ruled out.
+  // Report SID e0 routing: type 2 = physical passthrough, type 0 = translation.
+  // Never write SMR/S2CR here; shim reads the GPT under the handover map.
+  gHost.smmu = mapPhys(0x15000000, 0x200000, gHost.smmuMap);
+  if (gHost.smmu) {
+    uint32_t idr0 = read32(gHost.smmu, 0x20), idr1 = read32(gHost.smmu, 0x24);
+    unsigned groups = (idr0 & 255) < 120 ? (idr0 & 255) : 120;
+    unsigned pages = 1U << (((idr1 >> 28) & 7) + 1);
+    IOLog("PONG_UFS: SMMU diag idr0=%08x idr1=%08x groups=%u pages=%u\n",
+          idr0, idr1, groups, pages);
+    for (unsigned i = 0; i < groups; ++i) {
+      uint32_t smr = read32(gHost.smmu, 0x800 + 4 * i);
+      if (!(smr & 0x80000000U)) continue;
+      uint32_t mask = (smr >> 16) & 0x7fff;
+      if (((smr ^ 0xe0) & 0xffff & ~mask) != 0) continue;
+      uint32_t s2cr = read32(gHost.smmu, 0xc00 + 4 * i);
+      unsigned type = (s2cr >> 16) & 3, bank = s2cr & 255;
+      IOLog("PONG_UFS: SID e0 slot=%u smr=%08x s2cr=%08x type=%u bank=%u\n",
+            i, smr, s2cr, type, bank);
+      gHost.cb = gHost.smmu + (pages + bank) * 4096;
+    }
+  }
   } // Release before queue commands or storage readiness notifications.
   gRootDiagnostic.stage = "request list start";
   if (!hostStartQueue(&why)) return transportFailure(why);
-  gRootDiagnostic.stage = "NOP OUT";
-  if (hostNop() != kIOReturnSuccess) return transportFailure("NOP OUT");
+  // shim test_ufs probes with a COMMAND UPIU / TEST UNIT READY, never a NOP.
+  // Align the first command with the one path proven to read the whole GPT.
+  gRootDiagnostic.stage = "probe TUR (shim parity)";
+  uint32_t probeScsi = 0xffff;
+  bool probeOK = false;
+  for (unsigned attempt = 0; attempt < 3 && !gHost.poisoned; ++attempt) {
+    uint8_t probeTur[6] = {};
+    if (hostScsi(0, probeTur, sizeof(probeTur), false, 0, 200000, &probeScsi) == kIOReturnSuccess) {
+      probeOK = true;
+      break;
+    }
+  }
+  if (!probeOK) return transportFailure("probe TUR");
   uint32_t power = 0, scsi = 0;
   gRootDiagnostic.stage = "power mode query";
   if (hostQueryRead(3, 2, &power) != kIOReturnSuccess) return transportFailure("power mode query");

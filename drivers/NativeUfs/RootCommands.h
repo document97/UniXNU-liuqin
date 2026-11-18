@@ -168,7 +168,7 @@ static IOReturn hostResponseHeader (uint8_t type, uint8_t lun, uint8_t tag)
   return kIOReturnSuccess;
 }
 
-static IOReturn hostNop (void)
+__attribute__((unused)) static IOReturn hostNop (void)
 {
   if (!hostClearUcd ()) return kIOReturnNotReady;
   gHost.virt[kUcdOffset + 3] = 1;
